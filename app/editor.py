@@ -19,7 +19,6 @@ class NewsEditor:
     async def edit(self, news):
         response = await self.client.chat.completions.create(
             model=self.model,
-            temperature=0.2,
             response_format={"type": "json_object"},
             messages=[
                 {"role": "system", "content": SYSTEM},
