@@ -1,0 +1,197 @@
+import asyncio
+import logging
+from collections import deque
+from datetime import datetime, timedelta, timezone
+
+from app.collector import collect_news, fingerprint
+from app.dedup import is_similar_title, is_duplicate_event
+from app.editor import NewsEditor
+
+log = logging.getLogger(__name__)
+
+# Moderation should favour what is happening now. Old queued items are skipped
+# rather than being sent hours after they were relevant.
+MAX_QUEUE_AGE_MINUTES = 120
+
+
+def _published_timestamp(value):
+    if not value:
+        return 0.0
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return 0.0
+
+def _is_too_old(value):
+    if not value:
+        return False
+    try:
+        published = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if published.tzinfo is None:
+            published = published.replace(tzinfo=timezone.utc)
+        return published < datetime.now(timezone.utc) - timedelta(minutes=MAX_QUEUE_AGE_MINUTES)
+    except Exception:
+        return False
+
+
+class NewsPipeline:
+    def __init__(self, settings, db, bot):
+        self.settings = settings
+        self.db = db
+        self.bot = bot
+        self.editor = NewsEditor(settings.openai_api_key, settings.openai_model)
+
+        self.recent_titles = self.db.get_recent_titles(limit=1000)
+        self.recent_events = self.db.get_recent_event_keys(limit=1000)
+
+        self.queue = deque()
+        self.queue_keys = set()
+        self.queue_events = []
+
+    async def run_once(self):
+        items = await collect_news(self.settings)
+
+        # Hard source-tier ordering. Priority numbers alone are not enough:
+        # a website must never win over a configured Telegram channel because
+        # of equal priority or source collection order.
+        def source_tier(item):
+            return 2 if item.source.startswith("Telegram:") else 1
+
+        telegram_count = sum(1 for item in items if source_tier(item) == 2)
+        rss_count = len(items) - telegram_count
+        log.info(
+            "Collected %s candidates: %s Telegram PRIMARY, %s web/RSS SECONDARY",
+            len(items), telegram_count, rss_count,
+        )
+
+        # Telegram candidates are already round-robin interleaved by collector.
+        # Keep that exact order. Only sort secondary web/RSS candidates by priority.
+        telegram_items = [item for item in items if source_tier(item) == 2]
+        secondary_items = [item for item in items if source_tier(item) == 1]
+        secondary_items.sort(key=lambda item: item.priority, reverse=True)
+        items = telegram_items + secondary_items
+
+        if items:
+            log.info(
+                "Processing order starts with %s (%s, priority %s)",
+                items[0].source, items[0].title[:80], items[0].priority,
+            )
+
+        for raw in items:
+            key = fingerprint(raw)
+
+            if self.db.exists(raw.url, key):
+                continue
+
+            # Cheap first check for almost identical headlines.
+            if is_similar_title(raw, self.recent_titles, threshold=94):
+                self.db.add(raw.url, key, raw.title, raw.source, "duplicate")
+                continue
+
+            self.db.add(raw.url, key, raw.title, raw.source, "processing")
+
+            try:
+                edited = await self.editor.edit(raw)
+            except Exception:
+                log.exception("AI editing failed")
+                self.db.set_status(raw.url, "error")
+                continue
+
+            # Broad coverage mode: do not automatically discard a real news item
+            # solely because the AI marked the source material as low confidence.
+            # The human moderator makes the final decision.
+            if edited.confidence == "low":
+                log.info("Low-confidence candidate kept for human moderation: %s", raw.title)
+
+            if edited.importance < self.settings.min_importance_to_send:
+                self.db.set_status(raw.url, "low_priority")
+                continue
+
+            event_key = edited.event_key or edited.title
+
+            # Main semantic duplicate check: different headlines about the same event
+            # should not reach moderation again.
+            all_recent_events = self.recent_events + self.queue_events
+            if is_duplicate_event(event_key, all_recent_events, threshold=92):
+                self.db.set_event_key(raw.url, event_key)
+                self.db.set_status(raw.url, "duplicate")
+                log.info("Semantic duplicate skipped: %s", raw.title)
+                continue
+
+            self.db.set_event_key(raw.url, event_key)
+
+            self.recent_titles.append(raw.title)
+            self.recent_titles = self.recent_titles[-1000:]
+
+            self.recent_events.append(event_key)
+            self.recent_events = self.recent_events[-1000:]
+
+            self.queue.append(
+                (edited, raw.url, raw.image_url, raw.published_at, raw.source, raw.media_type, raw.media_path)
+            )
+            # Freshness-first: a breaking item found on the next poll jumps ahead
+            # of an older backlog. Equal timestamps keep the existing round-robin order.
+            self.queue = deque(sorted(self.queue, key=lambda item: _published_timestamp(item[3]), reverse=True))
+            self.queue_keys.add(raw.url)
+            self.queue_events.append(event_key)
+            self.db.set_status(raw.url, "queued")
+
+        log.info("Moderation queue size: %s", len(self.queue))
+
+    async def moderation_worker(self):
+        while True:
+            if not self.queue:
+                await asyncio.sleep(2)
+                continue
+
+            edited, url, image_url, published_at, source, media_type, media_path = self.queue.popleft()
+            self.queue_keys.discard(url)
+
+            # Never send a stale item merely because it spent too long waiting in the queue.
+            if _is_too_old(published_at):
+                self.db.set_status(url, "stale")
+                log.info("Skipped stale queued news (%s): %s", published_at, edited.title[:80])
+                continue
+
+            event_key = edited.event_key or edited.title
+            try:
+                self.queue_events.remove(event_key)
+            except ValueError:
+                pass
+
+            try:
+                await self.bot.send_for_moderation(
+                    edited,
+                    url,
+                    image_url,
+                    published_at,
+                    source,
+                    media_type,
+                    media_path,
+                )
+                self.db.set_status(url, "moderation")
+                log.info(
+                    "Sent one news item to moderation. Waiting %s seconds before next item.",
+                    self.settings.moderation_interval_seconds,
+                )
+                await asyncio.sleep(self.settings.moderation_interval_seconds)
+            except Exception:
+                log.exception("Failed to send queued news for moderation")
+                self.db.set_status(url, "error")
+                await asyncio.sleep(5)
+
+    async def run_forever(self):
+        worker = asyncio.create_task(self.moderation_worker())
+        try:
+            while True:
+                try:
+                    await self.run_once()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    log.exception("Pipeline iteration failed")
+
+                await asyncio.sleep(self.settings.check_interval_minutes * 60)
+        finally:
+            worker.cancel()
+            await asyncio.gather(worker, return_exceptions=True)
