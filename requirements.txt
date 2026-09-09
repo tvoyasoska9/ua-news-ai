@@ -1,0 +1,9 @@
+python-telegram-bot[job-queue]>=21.10,<22
+openai>=1.68.0
+feedparser>=6.0.11
+aiohttp>=3.10.0
+python-dotenv>=1.0.1
+rapidfuzz>=3.10.1
+beautifulsoup4>=4.12.3
+
+telethon>=1.36.0,<2
