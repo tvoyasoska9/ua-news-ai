@@ -243,7 +243,7 @@ class NewsEditor:
             response_format={"type": "json_object"},
             # Output is deliberately bounded. A news card does not need a long
             # generation and this protects against accidental verbose replies.
-            max_completion_tokens=1800,
+            max_completion_tokens=700,
             messages=[
                 {"role": "system", "content": system},
                 {
