@@ -196,6 +196,13 @@ class NewsPipeline:
                 if _is_too_old(raw.published_at):
                     self.db.set_status(raw.url, "stale")
                     _cleanup_media(raw.media_path, raw.media_paths)
+                    # This candidate never reached OpenAI, so do not let a
+                    # late-discovered article date consume the cycle's AI cap.
+                    ai_attempts -= 1
+                    try:
+                        pre_ai_titles.remove(raw.title)
+                    except ValueError:
+                        pass
                     continue
 
                 edited = await self.editor.edit(raw)
