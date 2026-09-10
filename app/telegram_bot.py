@@ -450,7 +450,20 @@ class NewsBot:
             await query.answer("Немає доступу", show_alert=True)
             return
 
-        action, item_id = query.data.split(":", 1)
+        allowed_users = self.settings.moderation_allowed_user_ids
+        if allowed_users and (not query.from_user or query.from_user.id not in allowed_users):
+            await query.answer("У вас немає прав модератора", show_alert=True)
+            return
+
+        try:
+            action, item_id = query.data.split(":", 1)
+        except ValueError:
+            await query.answer("Некоректна дія", show_alert=True)
+            return
+
+        if action not in {"publish", "reject"}:
+            await query.answer("Некоректна дія", show_alert=True)
+            return
         payload = self.pending.get(item_id)
         if not payload:
             saved = self.db.get_pending(item_id)
