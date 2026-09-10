@@ -83,8 +83,10 @@ def get_settings():
         # Hard guard against a source backlog/restart spending the whole API
         # balance in one polling cycle.
         max_ai_candidates_per_cycle=bounded_int("MAX_AI_CANDIDATES_PER_CYCLE", 1, 1, 2),
-        # News posts are short; a hard output cap prevents runaway generations.
-        max_completion_tokens=bounded_int("MAX_COMPLETION_TOKENS", 400, 250, 700),
+        # The editor must have enough output budget to preserve a complete
+        # multi-paragraph Telegram post. A low cap is a direct cause of
+        # unfinished sentences and missing paragraphs.
+        max_completion_tokens=bounded_int("MAX_COMPLETION_TOKENS", 1100, 400, 1600),
         # Optional allow-list for moderation callbacks. When empty, the existing
         # private-chat behavior is preserved; when configured, only these users
         # can publish or reject.
