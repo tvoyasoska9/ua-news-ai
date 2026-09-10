@@ -145,22 +145,22 @@ def strip_source_mentions(value, source=""):
     # "ТРУХА⚡️Україна | Надіслати новину"
     # The pattern is anchored to the end, so factual text before the footer is kept.
     promo_words = (
-        r"(?:підписатись|підписатися|подписаться(?:\\s+на\\s+канал)?|subscribe(?:\\s+now)?|"
-        r"надіслати\\s+новину|прислать\\s+новость|send\\s+news)"
+        r"(?:підписатись|підписатися|подписаться(?:\s+на\s+канал)?|subscribe(?:\s+now)?|"
+        r"надіслати\s+новину|прислать\s+новость|send\s+news)"
     )
     text = re.sub(
-        rf"(?i)\\s*[^\\n|•]{{1,140}}?\\s*[|•]\\s*{promo_words}\\s*[!…]*\\s*$",
+        rf"(?i)\s*[^\n|•]{{1,140}}?\s*[|•]\s*{promo_words}\s*[!…]*\s*$",
         "",
         text,
     )
     text = re.sub(
-        rf"(?i)\\s*[|•—–-]\\s*{promo_words}\\s*[!…]*(?=\\s|$)",
+        rf"(?i)\s*[|•—–-]\s*{promo_words}\s*[!…]*(?=\s|$)",
         " ",
         text,
     )
     # If a source puts the CTA on a separate tail without a separator, remove
     # only the CTA itself; never delete the factual sentence before it.
-    text = re.sub(rf"(?i)\\s+{promo_words}\\s*[!…]*\\s*$", "", text)
+    text = re.sub(rf"(?i)\s+{promo_words}\s*[!…]*\s*$", "", text)
 
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r" *\n *", "\n", text)
