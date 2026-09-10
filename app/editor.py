@@ -15,6 +15,16 @@ SYSTEM = """
 
 Твоя задача: перекласти матеріал українською та унікально переформулювати його.
 
+СПОЧАТКУ ПРОАНАЛІЗУЙ ЗМІСТ, А НЕ ОФОРМЛЕННЯ:
+- прочитай ВЕСЬ матеріал від початку до кінця;
+- визнач факти, твердження, причини, наслідки, оцінки спікерів і висновки;
+- не вирішуй, що є «головним», лише за першим реченням, емодзі, жирним шрифтом,
+  довжиною абзацу, розділовими знаками або позицією тексту;
+- кожен змістовний абзац перевір окремо: якщо він додає новий факт, цей факт має
+  залишитися в результаті;
+- заборонено брати перші 2–3 рядки та механічно обривати решту матеріалу;
+- заборонено завершувати text незакінченим реченням або фрагментом думки.
+
 ГОЛОВНЕ ПРАВИЛО ОБСЯГУ:
 Пиши стислий Telegram-пост, а не повний переклад статті.
 
@@ -276,6 +286,40 @@ def _word_count(value):
     return len(re.findall(r"(?u)\b[\w’'-]+\b", _plain(value)))
 
 
+def _meaningful_paragraphs(value):
+    return [
+        _plain(part).strip()
+        for part in re.split(r"\n\s*\n+", str(value or ""))
+        if len(_plain(part).strip()) >= 20
+    ]
+
+
+def _coverage_too_low(title, text, material):
+    """Conservative completeness guard for multi-paragraph Telegram posts."""
+    original_words = _word_count(material)
+    if original_words < 45:
+        return False
+
+    result_words = _word_count(title) + _word_count(text)
+    source_paragraphs = _meaningful_paragraphs(material)
+    result_paragraphs = _meaningful_paragraphs(text)
+
+    # For short/medium posts the editor should preserve substance, not produce
+    # a tiny headline-sized summary. The threshold is intentionally much higher
+    # than the old 55% guard because that still allowed whole factual sections
+    # to disappear.
+    if result_words < int(original_words * 0.70):
+        return True
+
+    # If a source contains several substantive paragraphs but the result has
+    # collapsed into a tiny fragment, treat it as suspicious even when the word
+    # ratio happens to pass because of a long headline.
+    if len(source_paragraphs) >= 4 and len(result_paragraphs) <= 1:
+        return True
+
+    return False
+
+
 def _fallback_full_material(material):
     """Lossless fallback for short/medium posts when AI drops factual paragraphs."""
     lines = [line.strip() for line in str(material or "").splitlines() if line.strip()]
@@ -303,16 +347,7 @@ def _fallback_full_material(material):
 
 
 def _material_coverage_too_low(title, text, material):
-    """Detect a model answer that silently discarded most of a factual post."""
-    original_words = _word_count(material)
-    if original_words < 55:
-        return False
-
-    result_words = _word_count(title) + _word_count(text)
-    # A real rewrite may be shorter, but returning less than ~55% of a
-    # short/medium source is a strong signal that whole factual paragraphs were
-    # omitted rather than merely edited.
-    return result_words < int(original_words * 0.55)
+    return _coverage_too_low(title, text, material)
 
 
 def _title_repeated_in_body(title, body):
@@ -380,23 +415,23 @@ class NewsEditor:
         api_key,
         model,
         max_material_chars=7000,
-        max_completion_tokens=400,
+        max_completion_tokens=1100,
         max_retries=2,
     ):
         self.client = AsyncOpenAI(api_key=api_key)
         self.model = model
         self.max_material_chars = max(1500, min(int(max_material_chars), 6000))
-        self.max_completion_tokens = max(250, min(int(max_completion_tokens), 700))
+        self.max_completion_tokens = max(400, min(int(max_completion_tokens), 1600))
         self.max_retries = max(0, min(int(max_retries), 3))
 
-    async def _request(self, messages):
+    async def _request(self, messages, max_completion_tokens=None):
         transient = (APIConnectionError, APITimeoutError, InternalServerError, RateLimitError)
         for attempt in range(self.max_retries + 1):
             try:
                 return await self.client.chat.completions.create(
                     model=self.model,
                     response_format={"type": "json_object"},
-                    max_completion_tokens=self.max_completion_tokens,
+                    max_completion_tokens=max_completion_tokens or self.max_completion_tokens,
                     messages=messages,
                 )
             except transient:
@@ -413,17 +448,28 @@ class NewsEditor:
         if not material or not original_plain:
             raise ValueError("Candidate lost all factual text during source cleanup")
 
+        # Output capacity scales with the factual amount of the source. This
+        # prevents a multi-paragraph post from being forced into a tiny token
+        # budget and cut off in the middle of a thought.
+        original_words = _word_count(material)
+        completion_budget = min(
+            self.max_completion_tokens,
+            max(500, min(1500, int(original_words * 2.2) + 180)),
+        )
+
         system = SYSTEM + """
 
-ДОДАТКОВИЙ КОНТРОЛЬ ЯКОСТІ — ВИКОНАЙ ЙОГО В ЦЬОМУ Ж ЄДИНОМУ ЗАПИТІ:
-- Не створюй повторний варіант тексту після відповіді.
-- Перед відповіддю самостійно перевір, що text не починається переказом title.
-- Пиши стисло: передай суть і ключові факти без повторів та другорядних деталей.
-- Не намагайся зберігати повний обсяг оригіналу.
-- Для короткого поста не вигадуй окремий вступ або висновок.
-- Якщо title вже містить весь факт, у text залишай тільки деталі, яких у title немає.
-- Перевір, що жоден змістовний абзац короткого/середнього оригіналу не зник.
-  Не залишай лише перший абзац, якщо далі є нові факти.
+ДОДАТКОВИЙ КОНТРОЛЬ ЯКОСТІ:
+- Перед формуванням JSON прочитай весь матеріал і перевір зміст кожного абзацу.
+- Відбирай факти за змістом, а не за емодзі, жирним шрифтом, першою позицією,
+  довжиною рядка чи іншими візуальними ознаками.
+- Не залишай лише перший абзац, якщо далі є нові факти.
+- Якщо оригінал містить кілька змістовних абзаців, результат повинен передати
+  зміст усіх таких абзаців, навіть якщо їх доведеться об'єднати.
+- Кожне речення у відповіді має бути завершеним. Ніяких обривів на півслові,
+  на середині речення або після незавершеної думки.
+- Для короткого/середнього поста не стискай текст механічно до 2–3 рядків.
+- Якщо title вже містить головний факт, у text залишай решту важливих деталей.
 - Поверни готовий результат з першої спроби.
 """
 
@@ -439,7 +485,7 @@ class NewsEditor:
                     f"Оригінальний матеріал ({original_len} символів без HTML):\n{material}"
                 ),
             },
-        ])
+        ], max_completion_tokens=completion_budget)
 
         data = json.loads(response.choices[0].message.content or "{}")
         title = strip_source_mentions(data.get("title") or "", news.source)
@@ -462,12 +508,53 @@ class NewsEditor:
                 paragraphs = paragraphs[1:]
             text = "\n\n".join(paragraphs).strip()
 
-        # A common failure mode is a superficially clean summary that keeps only
-        # the opening paragraph and silently drops the rest of a Telegram post.
-        # For short/medium material, factual completeness is more important than
-        # an artificial summary ratio, so fall back to the cleaned source rather
-        # than publishing a mutilated version.
-        if len(original_plain) <= 2200 and _material_coverage_too_low(title, text, material):
+        # If the draft is suspiciously short, make one targeted repair call.
+        # The repair is asked to analyze the original content again and restore
+        # omitted facts; it is not a blind retry of the same prompt.
+        if len(original_plain) <= 3200 and _material_coverage_too_low(title, text, material):
+            repair_system = SYSTEM + """
+РЕЖИМ ВІДНОВЛЕННЯ ПОВНОТИ:
+Нижче є ОРИГІНАЛ і ЧЕРНЕТКА, яка могла втратити частину змісту.
+Порівняй їх ЗА ЗМІСТОМ абзац за абзацом. Віднови всі фактичні твердження,
+які є в оригіналі, але відсутні в чернетці. Не додавай нових фактів.
+Не орієнтуйся на емодзі, форматування або перші рядки. Поверни повний
+готовий JSON із завершеними реченнями.
+"""
+            repair_response = await self._request([
+                {"role": "system", "content": repair_system},
+                {
+                    "role": "user",
+                    "content": (
+                        f"ОРИГІНАЛ:\n{material}\n\n"
+                        f"ЧЕРНЕТКА TITLE:\n{title}\n\n"
+                        f"ЧЕРНЕТКА TEXT:\n{text}\n\n"
+                        "Віднови пропущені факти та збережи природну структуру."
+                    ),
+                },
+            ], max_completion_tokens=completion_budget)
+
+            try:
+                repaired = json.loads(repair_response.choices[0].message.content or "{}")
+                repaired_title = strip_source_mentions(repaired.get("title") or "", news.source)
+                repaired_text = sanitize_news_html(repaired.get("text") or "", news.source)
+                repaired_text = sanitize_news_html(_finish_at_sentence_boundary(repaired_text), news.source)
+                if _is_usable_title(repaired_title):
+                    repaired_event = strip_source_mentions(
+                        repaired.get("event_key") or repaired_title or event_key,
+                        news.source,
+                    )
+                    if not _material_coverage_too_low(repaired_title, repaired_text, material):
+                        title = repaired_title
+                        text = repaired_text
+                        event_key = repaired_event
+            except Exception:
+                # A malformed repair response must never break moderation.
+                pass
+
+        # Final lossless guard: if the model still discarded a substantial part
+        # of a short/medium source, publish the cleaned factual material rather
+        # than an attractive but mutilated summary.
+        if len(original_plain) <= 3200 and _material_coverage_too_low(title, text, material):
             fallback_title, fallback_body = _fallback_full_material(material)
             if _is_usable_title(fallback_title):
                 title = fallback_title
