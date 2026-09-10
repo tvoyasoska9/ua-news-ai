@@ -24,7 +24,11 @@ SYSTEM = """
 - коротке джерело -> короткий результат;
 - довгу статтю стискай до суті без втрати головних фактів;
 - зазвичай достатньо приблизно 80–180 слів;
-- не роздувай текст лише для того, щоб повторити обсяг оригіналу.
+- не роздувай текст лише для того, щоб повторити обсяг оригіналу;
+- але НІКОЛИ не скорочуй короткий або середній Telegram-пост настільки, щоб
+  зникли окремі фактичні абзаци, ключові ризики, причини чи висновки автора;
+- якщо оригінал уже короткий/середній, збережи практично весь його фактичний
+  зміст і всі змістовні абзаци, а не лише перше речення.
 
 ЗАГОЛОВОК І ОСНОВНИЙ ТЕКСТ — НЕ ПОВТОРЮЮТЬ ОДНЕ ОДНОГО:
 - title коротко повідомляє головний факт;
@@ -268,6 +272,49 @@ def _is_usable_title(value):
     return len(plain) >= 12 and normalized not in GENERIC_TITLES
 
 
+def _word_count(value):
+    return len(re.findall(r"(?u)\b[\w’'-]+\b", _plain(value)))
+
+
+def _fallback_full_material(material):
+    """Lossless fallback for short/medium posts when AI drops factual paragraphs."""
+    lines = [line.strip() for line in str(material or "").splitlines() if line.strip()]
+    if not lines:
+        return "", ""
+
+    first = lines[0]
+    title = _fallback_title_from_material(first) or _fallback_title_from_material(material)
+    if not title:
+        return "", ""
+
+    first_plain = _plain(first).strip()
+    title_plain = _plain(title).strip()
+
+    # If the first paragraph is exactly the factual headline, the remaining
+    # paragraphs are the body. Otherwise keep the entire material as body so
+    # no factual sentence disappears.
+    if first_plain and title_plain and first_plain == title_plain:
+        body_lines = lines[1:]
+    else:
+        body_lines = lines
+
+    body = "\n\n".join(body_lines).strip()
+    return title, sanitize_news_html(body)
+
+
+def _material_coverage_too_low(title, text, material):
+    """Detect a model answer that silently discarded most of a factual post."""
+    original_words = _word_count(material)
+    if original_words < 55:
+        return False
+
+    result_words = _word_count(title) + _word_count(text)
+    # A real rewrite may be shorter, but returning less than ~55% of a
+    # short/medium source is a strong signal that whole factual paragraphs were
+    # omitted rather than merely edited.
+    return result_words < int(original_words * 0.55)
+
+
 def _title_repeated_in_body(title, body):
     title_plain = _plain(title)
     first = _first_paragraph(body)
@@ -375,6 +422,8 @@ class NewsEditor:
 - Не намагайся зберігати повний обсяг оригіналу.
 - Для короткого поста не вигадуй окремий вступ або висновок.
 - Якщо title вже містить весь факт, у text залишай тільки деталі, яких у title немає.
+- Перевір, що жоден змістовний абзац короткого/середнього оригіналу не зник.
+  Не залишай лише перший абзац, якщо далі є нові факти.
 - Поверни готовий результат з першої спроби.
 """
 
@@ -412,6 +461,18 @@ class NewsEditor:
             if paragraphs:
                 paragraphs = paragraphs[1:]
             text = "\n\n".join(paragraphs).strip()
+
+        # A common failure mode is a superficially clean summary that keeps only
+        # the opening paragraph and silently drops the rest of a Telegram post.
+        # For short/medium material, factual completeness is more important than
+        # an artificial summary ratio, so fall back to the cleaned source rather
+        # than publishing a mutilated version.
+        if len(original_plain) <= 2200 and _material_coverage_too_low(title, text, material):
+            fallback_title, fallback_body = _fallback_full_material(material)
+            if _is_usable_title(fallback_title):
+                title = fallback_title
+            text = fallback_body
+            event_key = strip_source_mentions(event_key or title, news.source)
 
         # Last-resort local guard. We do not ask the API to rewrite again.
         # If a model response is wildly longer than the source, keeping the
