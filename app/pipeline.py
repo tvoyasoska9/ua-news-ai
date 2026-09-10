@@ -3,7 +3,7 @@ import logging
 from collections import deque
 from datetime import datetime, timedelta, timezone
 
-from app.collector import collect_news, fingerprint
+from app.collector import collect_news, fingerprint, materialize_telegram_media
 from app.dedup import is_similar_title, is_duplicate_event
 from app.editor import NewsEditor
 
@@ -185,6 +185,9 @@ class NewsPipeline:
             self.db.record_metric(raw.url, raw.source, "found")
 
             try:
+                # All cheap screening is complete. Only the selected candidate
+                # may now download Telegram media.
+                await materialize_telegram_media(raw)
                 edited = await self.editor.edit(raw)
             except Exception:
                 log.exception("AI editing failed")
