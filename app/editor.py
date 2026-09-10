@@ -88,7 +88,10 @@ TELEGRAM_SOURCE_RE = re.compile(
 TELEGRAM_URL_RE = re.compile(
     r"(?i)(?:https?://)?(?:www\.)?(?:t\.me|telegram\.me)/[A-Za-z0-9_./?=&%-]+"
 )
-MENTION_RE = re.compile(r"(?<!\w)@[A-Za-z0-9_]{3,}\b")
+MENTION_RE = re.compile(r"(?<!\\w)@[A-Za-z0-9_]{3,}\\b")
+PROMO_LINE_RE = re.compile(
+    r"(?im)^\\s*(?:[^\\n]{0,120}?[|•])?\\s*(?:підписатись|підписатися|подписаться(?:\\s+на\\s+канал)?|subscribe(?:\\s+now)?)\\s*[!…]*\\s*$"
+)
 
 
 def _source_aliases(source):
@@ -121,21 +124,33 @@ def strip_source_mentions(value, source=""):
         " ", text,
     )
 
-    # Remove common Telegram channel footer / subscription calls. These are
-    # source promotion, not part of the news.
-    subscribe_words = r"(?:підписатись|підписатися|подписаться|подписаться на канал|subscribe(?:\s+now)?)"
+    # Remove Telegram/channel promotion footers generically, including
+    # "Україна Online | Підписатись" and "Інформатор | Підписатися".
+    # These may belong to a channel other than the configured source.
+    lines = []
+    for line in text.splitlines():
+        if PROMO_LINE_RE.match(line):
+            continue
+        lines.append(line)
+    text = "\n".join(lines)
+
+    # Inline footer variants at the end of an otherwise normal line.
     text = re.sub(
-        rf"(?im)^\s*(?:[|•—–-]\s*)?{subscribe_words}\s*[!…]*\s*$",
-        " ",
+        r"(?i)\\s*(?:[|•—–-]\\s*)[^\\n|•]{1,100}?\\s*[|•]\\s*"
+        r"(?:підписатись|підписатися|подписаться(?:\\s+на\\s+канал)?|subscribe(?:\\s+now)?)"
+        r"\\s*[!…]*\\s*$",
+        "",
         text,
     )
     text = re.sub(
-        rf"(?i)\s*[|•]\s*{subscribe_words}\s*[!…]*(?=\s|$)",
+        r"(?i)\\s*[|•—–-]\\s*"
+        r"(?:підписатись|підписатися|подписаться(?:\\s+на\\s+канал)?|subscribe(?:\\s+now)?)"
+        r"\\s*[!…]*(?=\\s|$)",
         " ",
         text,
     )
 
-    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"[ \\t]+", " ", text)
     text = re.sub(r" *\n *", "\n", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     text = re.sub(r"\s+([,.;:!?])", r"\1", text)
@@ -224,6 +239,35 @@ def _title_repeated_in_body(title, body):
     return token_set >= 92 and token_sort >= 72 and len(first_norm) <= len(title_norm) * 2.5
 
 
+def _trim_to_sentence_boundary(value, limit):
+    """Keep complete sentences only; never silently return a broken fragment."""
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    boundary = max(text.rfind(mark, 0, limit + 1) for mark in ".!?…")
+    if boundary >= max(40, int(limit * 0.45)):
+        return text[:boundary + 1].rstrip()
+    grace_end = min(len(text), limit + 240)
+    candidates = [text.find(mark, limit, grace_end) for mark in ".!?…"]
+    candidates = [pos for pos in candidates if pos != -1]
+    if candidates:
+        return text[:min(candidates) + 1].rstrip()
+    return text
+
+
+def _finish_at_sentence_boundary(value):
+    """Repair a locally truncated model response without inventing text."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if text[-1] in ".!?…»”)]}":
+        return text
+    boundary = max(text.rfind(mark) for mark in ".!?…")
+    if boundary >= max(40, int(len(text) * 0.45)):
+        return text[:boundary + 1].rstrip()
+    return ""
+
+
 class NewsEditor:
     """One API call per unique candidate.
 
@@ -262,7 +306,8 @@ class NewsEditor:
                 await asyncio.sleep(min(8, 1.5 * (2 ** attempt)))
 
     async def edit(self, news):
-        material = str(news.summary or news.title or "")[:self.max_material_chars]
+        raw_material = strip_source_mentions(str(news.summary or news.title or ""), news.source)
+        material = _trim_to_sentence_boundary(raw_material, self.max_material_chars)
         original_plain = _plain(material)
         original_len = len(original_plain)
 
@@ -295,6 +340,7 @@ class NewsEditor:
         data = json.loads(response.choices[0].message.content or "{}")
         title = strip_source_mentions(data.get("title") or news.title, news.source)
         text = sanitize_news_html(data.get("text") or "", news.source)
+        text = _finish_at_sentence_boundary(text)
         event_key = strip_source_mentions(data.get("event_key") or title or news.title, news.source)
 
         # Never pay for a second AI call just because the model repeated the
