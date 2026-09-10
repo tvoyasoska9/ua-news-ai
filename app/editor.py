@@ -127,7 +127,8 @@ def _strip_promo_footer(text):
 
     match = matches[-1]
     # Only treat it as a footer when the CTA is actually at the end of the line.
-    tail = last[match.end():].strip(" \t.!…‼️❗️")
+    # Closing HTML tags after a CTA do not count as factual trailing text.
+    tail = re.sub(r"</?[^>]+>", "", last[match.end():]).strip(" \t.!…‼️❗️")
     if tail:
         return "\n".join(lines)
 
@@ -210,9 +211,10 @@ class _SafeHTML(HTMLParser):
                     break
 
     def handle_data(self, data):
-        cleaned = strip_source_mentions(data, self.source)
-        if cleaned:
-            self.parts.append(html_escape(cleaned, quote=False))
+        # Cleanup happens on the complete original string before HTML parsing.
+        # Cleaning parser fragments separately can miss a promo split by tags.
+        if data:
+            self.parts.append(html_escape(data, quote=False))
 
     def get_html(self):
         while self.stack:
@@ -225,10 +227,15 @@ class _SafeHTML(HTMLParser):
 
 
 def sanitize_news_html(value, source=""):
-    parser = _SafeHTML(source)
-    parser.feed(str(value or ""))
+    # Clean the complete text before parsing so Telegram promo footers cannot
+    # survive because HTMLParser split them into separate data fragments.
+    cleaned = strip_source_mentions(str(value or ""), source)
+    parser = _SafeHTML()
+    parser.feed(cleaned)
     parser.close()
-    return parser.get_html()
+    result = parser.get_html()
+    # Final whole-text guard for promo text that was wrapped in harmless HTML.
+    return strip_source_mentions(result, source)
 
 
 def _plain(value):
@@ -387,10 +394,11 @@ class NewsEditor:
 
         data = json.loads(response.choices[0].message.content or "{}")
         title = strip_source_mentions(data.get("title") or "", news.source)
-        # A generic placeholder is never published. If the model loses the
-        # headline, use the first factual sentence from the already-clean source.
+        # A generic placeholder such as "Новина" is never allowed through.
         if not _is_usable_title(title):
             title = _fallback_title_from_material(material)
+        if not _is_usable_title(title):
+            title = _fallback_title_from_material(news.title)
         if not _is_usable_title(title):
             raise ValueError("AI returned no usable factual title")
         text = sanitize_news_html(data.get("text") or "", news.source)
