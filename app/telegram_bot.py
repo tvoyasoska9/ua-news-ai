@@ -132,23 +132,33 @@ class NewsBot:
 
     def moderation_text(self, item, published_at=None, source=None, original_url=None):
         title, body = self._public_body(item, source)
+        signature = '<b><a href="https://t.me/ukr24live">УКРАЇНА 🇺🇦 LIVE 24</a></b>'
+
         lines = [
-            "🟡 <b>НА ПЕРЕВІРКУ</b>", "",
-            f"🇺🇦 <b>{title}</b>", "",
-            body, "",
+            "🟡 <b>НА ПЕРЕВІРКУ</b>",
+            "",
+            f"🇺🇦 <b>{title}</b>",
+        ]
+        if body:
+            # Exactly one empty line between the news text and channel signature.
+            lines += ["", body, "", signature]
+        else:
+            lines += ["", signature]
+
+        lines += [
+            "",
+            "━━━━━━━━━━━━━━",
             f"📅 Опубліковано: <b>{escape(self.format_date(published_at))}</b>",
             f"📊 Важливість: <b>{item.importance}/10</b>",
             f"📂 Категорія: {escape(item.category)}",
             f"🔍 Впевненість: {escape(item.confidence)}",
             "",
-            "━━━━━━━━━━━━━━",
             "🔐 <b>АДМІН-ІНФОРМАЦІЯ</b>",
             f"📡 Джерело: <b>{escape(source or 'Невідомо')}</b>",
         ]
         safe_url = self._safe_original_url(original_url)
         if safe_url:
             lines.append(f'🔗 <a href="{escape(safe_url, quote=True)}">Відкрити оригінальну публікацію</a>')
-        lines += ["", '<b><a href="https://t.me/ukr24live">УКРАЇНА 🇺🇦 LIVE 24</a></b>']
         return "\n".join(lines)
 
     def publish_text(self, item):
