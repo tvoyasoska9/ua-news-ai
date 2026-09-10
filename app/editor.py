@@ -89,12 +89,12 @@ TELEGRAM_URL_RE = re.compile(
     r"(?i)(?:https?://)?(?:www\.)?(?:t\.me|telegram\.me)/[A-Za-z0-9_./?=&%-]+"
 )
 MENTION_RE = re.compile(r"(?<!\w)@[A-Za-z0-9_]{3,}\b")
-PROMO_LINE_RE = re.compile(
-    r"(?im)^\s*(?:[^\n]{0,120}?[|•])?\s*(?:підписатись|підписатися|подписаться(?:\s+на\s+канал)?|subscribe(?:\s+now)?|надіслати\s+новину|прислать\s+новость|send\s+news)\s*[!…]*\s*$"
-)
 PROMO_CTA_RE = re.compile(
-    r"(?i)(?:підписатись|підписатися|подписаться(?:\s+на\s+канал)?|subscribe(?:\s+now)?|"
-    r"надіслати\s+новину|прислать\s+новость|send\s+news)"
+    r"(?i)(?:"
+    r"підписатись|підписатися|підписуйся(?:\s+на\s+[^\n|•]{1,60})?|"
+    r"подписаться(?:\s+на\s+канал)?|subscribe(?:\s+now)?|"
+    r"надіслати\s+новину|прислать\s+новость|send\s+news"
+    r")"
 )
 GENERIC_TITLES = {"новина", "news", "новости", "повідомлення", "повідомлення дня"}
 
@@ -111,13 +111,55 @@ def _source_aliases(source):
     return {x for x in aliases if x}
 
 
+def _strip_promo_footer(text):
+    """Remove only a trailing Telegram promo/CTA without deleting the news itself."""
+    lines = str(text or "").splitlines()
+    while lines and not lines[-1].strip():
+        lines.pop()
+
+    if not lines:
+        return ""
+
+    last = lines[-1].strip()
+    matches = list(PROMO_CTA_RE.finditer(last))
+    if not matches:
+        return "\n".join(lines)
+
+    match = matches[-1]
+    # Only treat it as a footer when the CTA is actually at the end of the line.
+    tail = last[match.end():].strip(" \t.!…‼️❗️")
+    if tail:
+        return "\n".join(lines)
+
+    before = last[:match.start()].rstrip()
+
+    # A standalone footer such as "Україна Online | Підписатись".
+    if before.endswith(("|", "•")):
+        label = before[:-1].strip()
+        if label and len(label) <= 100 and not re.search(r"[.!?…]", label):
+            lines.pop()
+            return "\n".join(lines).rstrip()
+
+    # Inline footer after a real sentence:
+    # "... — монітори. ТРУХА⚡️Україна | Надіслати новину"
+    # "... автомобілі. Підписуйся на ОКО"
+    boundary = max(before.rfind(mark) for mark in ".!?…")
+    if boundary >= 0:
+        lines[-1] = before[:boundary + 1].rstrip()
+        return "\n".join(lines).rstrip()
+
+    # If there is no safe factual sentence boundary, never erase the whole
+    # candidate. Remove only the CTA itself and leave the factual text intact.
+    lines[-1] = before.rstrip(" |•—–-")
+    return "\n".join(lines).rstrip()
+
+
 def strip_source_mentions(value, source=""):
     text = str(value or "").strip()
     if not text:
         return ""
 
-    # Replace with spaces, never an empty string. This prevents words on the
-    # two sides of a removed source/username from being glued together.
+    # Remove explicit source identifiers first.
     text = TELEGRAM_URL_RE.sub(" ", text)
     text = SOURCE_LABEL_RE.sub(" ", text)
     text = TELEGRAM_SOURCE_RE.sub(" ", text)
@@ -126,41 +168,13 @@ def strip_source_mentions(value, source=""):
         text = re.sub(re.escape(alias), " ", text, flags=re.IGNORECASE)
     text = re.sub(
         r"(?i)\b(?:за даними|повідомляє|повідомив|зазначає)\s+(?:телеграм[-\s]?канал|канал)\b",
-        " ", text,
-    )
-
-    # Remove Telegram/channel promotion footers generically, including
-    # "Україна Online | Підписатись" and "Інформатор | Підписатися".
-    # These may belong to a channel other than the configured source.
-    lines = []
-    for line in text.splitlines():
-        if PROMO_LINE_RE.match(line):
-            continue
-        lines.append(line)
-    text = "\n".join(lines)
-
-    # Remove complete trailing channel footers, not just the final CTA.
-    # Examples:
-    # "Україна Online | Підписатись"
-    # "ТРУХА⚡️Україна | Надіслати новину"
-    # The pattern is anchored to the end, so factual text before the footer is kept.
-    promo_words = (
-        r"(?:підписатись|підписатися|подписаться(?:\s+на\s+канал)?|subscribe(?:\s+now)?|"
-        r"надіслати\s+новину|прислать\s+новость|send\s+news)"
-    )
-    text = re.sub(
-        rf"(?i)\s*[^\n|•]{{1,140}}?\s*[|•]\s*{promo_words}\s*[!…]*\s*$",
-        "",
-        text,
-    )
-    text = re.sub(
-        rf"(?i)\s*[|•—–-]\s*{promo_words}\s*[!…]*(?=\s|$)",
         " ",
         text,
     )
-    # If a source puts the CTA on a separate tail without a separator, remove
-    # only the CTA itself; never delete the factual sentence before it.
-    text = re.sub(rf"(?i)\s+{promo_words}\s*[!…]*\s*$", "", text)
+
+    # Strip foreign-channel promotion only at the end. The previous regex was
+    # too broad: with an inline footer it could consume the entire factual line.
+    text = _strip_promo_footer(text)
 
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r" *\n *", "\n", text)
@@ -337,10 +351,13 @@ class NewsEditor:
                 await asyncio.sleep(min(8, 1.5 * (2 ** attempt)))
 
     async def edit(self, news):
-        raw_material = strip_source_mentions(str(news.summary or news.title or ""), news.source)
+        raw_input = str(news.summary or news.title or "")
+        raw_material = strip_source_mentions(raw_input, news.source)
         material = _trim_to_sentence_boundary(raw_material, self.max_material_chars)
         original_plain = _plain(material)
         original_len = len(original_plain)
+        if not material or not original_plain:
+            raise ValueError("Candidate lost all factual text during source cleanup")
 
         system = SYSTEM + """
 
@@ -370,11 +387,12 @@ class NewsEditor:
 
         data = json.loads(response.choices[0].message.content or "{}")
         title = strip_source_mentions(data.get("title") or "", news.source)
-        # "Новина" is never an acceptable replacement for a real short source
-        # post. If the model loses the headline during sanitization, preserve
-        # the first factual sentence from the already-clean original material.
+        # A generic placeholder is never published. If the model loses the
+        # headline, use the first factual sentence from the already-clean source.
         if not _is_usable_title(title):
             title = _fallback_title_from_material(material)
+        if not _is_usable_title(title):
+            raise ValueError("AI returned no usable factual title")
         text = sanitize_news_html(data.get("text") or "", news.source)
         text = sanitize_news_html(_finish_at_sentence_boundary(text), news.source)
         event_key = strip_source_mentions(data.get("event_key") or title or news.title, news.source)
@@ -421,7 +439,7 @@ class NewsEditor:
             confidence = "medium"
 
         return EditedNews(
-            title=title or _fallback_title_from_material(material) or "Новина",
+            title=title,
             text=text,
             category=str(data.get("category") or "Інше").strip(),
             importance=importance,
