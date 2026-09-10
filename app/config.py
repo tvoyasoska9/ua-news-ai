@@ -37,6 +37,7 @@ class Settings:
     telegram_session: str
     max_article_chars: int
     max_ai_candidates_per_cycle: int
+    max_completion_tokens: int
 
 
 def get_settings():
@@ -62,8 +63,10 @@ def get_settings():
         telegram_session=required("TELEGRAM_SESSION"),
         # A Telegram news post almost never needs 24,000 characters of source
         # material. This is the main API-cost guard.
-        max_article_chars=bounded_int("MAX_ARTICLE_CHARS", 5000, 2000, 8000),
+        max_article_chars=bounded_int("MAX_ARTICLE_CHARS", 3500, 1500, 6000),
         # Hard guard against a source backlog/restart spending the whole API
         # balance in one polling cycle.
-        max_ai_candidates_per_cycle=bounded_int("MAX_AI_CANDIDATES_PER_CYCLE", 2, 1, 4),
+        max_ai_candidates_per_cycle=bounded_int("MAX_AI_CANDIDATES_PER_CYCLE", 1, 1, 2),
+        # News posts are short; a hard output cap prevents runaway generations.
+        max_completion_tokens=bounded_int("MAX_COMPLETION_TOKENS", 400, 250, 700),
     )
