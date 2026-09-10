@@ -1,9 +1,10 @@
+import asyncio
 import json
 import re
 from html import escape as html_escape
 from html.parser import HTMLParser
 
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, APIConnectionError, APITimeoutError, InternalServerError, RateLimitError
 from rapidfuzz import fuzz
 
 from app.models import EditedNews
@@ -212,11 +213,34 @@ class NewsEditor:
     checks only remove an obviously duplicated first paragraph.
     """
 
-    def __init__(self, api_key, model, max_material_chars=7000, max_completion_tokens=400):
+    def __init__(
+        self,
+        api_key,
+        model,
+        max_material_chars=7000,
+        max_completion_tokens=400,
+        max_retries=2,
+    ):
         self.client = AsyncOpenAI(api_key=api_key)
         self.model = model
         self.max_material_chars = max(1500, min(int(max_material_chars), 6000))
         self.max_completion_tokens = max(250, min(int(max_completion_tokens), 700))
+        self.max_retries = max(0, min(int(max_retries), 3))
+
+    async def _request(self, messages):
+        transient = (APIConnectionError, APITimeoutError, InternalServerError, RateLimitError)
+        for attempt in range(self.max_retries + 1):
+            try:
+                return await self.client.chat.completions.create(
+                    model=self.model,
+                    response_format={"type": "json_object"},
+                    max_completion_tokens=self.max_completion_tokens,
+                    messages=messages,
+                )
+            except transient:
+                if attempt >= self.max_retries:
+                    raise
+                await asyncio.sleep(min(8, 1.5 * (2 ** attempt)))
 
     async def edit(self, news):
         material = str(news.summary or news.title or "")[:self.max_material_chars]
@@ -235,26 +259,19 @@ class NewsEditor:
 - Поверни готовий результат з першої спроби.
 """
 
-        response = await self.client.chat.completions.create(
-            model=self.model,
-            response_format={"type": "json_object"},
-            # Output is deliberately bounded. A news card does not need a long
-            # generation and this protects against accidental verbose replies.
-            max_completion_tokens=self.max_completion_tokens,
-            messages=[
-                {"role": "system", "content": system},
-                {
-                    "role": "user",
-                    "content": (
-                        "Внутрішні метадані для перевірки фактів. "
-                        "НЕ включай джерело, username або посилання в результат.\n"
-                        f"Заголовок матеріалу: {news.title}\n"
-                        f"Дата публікації: {news.published_at or 'невідомо'}\n"
-                        f"Оригінальний матеріал ({original_len} символів без HTML):\n{material}"
-                    ),
-                },
-            ],
-        )
+        response = await self._request([
+            {"role": "system", "content": system},
+            {
+                "role": "user",
+                "content": (
+                    "Внутрішні метадані для перевірки фактів. "
+                    "НЕ включай джерело, username або посилання в результат.\n"
+                    f"Заголовок матеріалу: {news.title}\n"
+                    f"Дата публікації: {news.published_at or 'невідомо'}\n"
+                    f"Оригінальний матеріал ({original_len} символів без HTML):\n{material}"
+                ),
+            },
+        ])
 
         data = json.loads(response.choices[0].message.content or "{}")
         title = strip_source_mentions(data.get("title") or news.title, news.source)
