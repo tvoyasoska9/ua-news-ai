@@ -44,11 +44,15 @@ SYSTEM = """
 Зберігай абзаци та загальну структуру оригіналу настільки точно, наскільки це
 можливо після перекладу й перефразування.
 
-ДЖЕРЕЛА — АБСОЛЮТНЕ ТАБУ В ГОТОВІЙ НОВИНІ:
+ДЖЕРЕЛА ТА ПРОМО БЛОКИ — АБСОЛЮТНЕ ТАБУ В ГОТОВІЙ НОВИНІ:
 У title і text категорично заборонено згадувати назву каналу/сайту, @username,
 t.me, Telegram-канал як джерело, посилання на оригінал, слова «Джерело»,
 «Источник», «Source» разом із походженням інформації.
-Не розкривай походження матеріалу ні в якому вигляді.
+Також категорично заборонені будь-які рекламні або підписні вставки з оригіналу:
+«Підписатись», «Підписатися», «Подписаться», «Subscribe», назва чужого каналу
+разом із закликом підписатися, кнопки, слогани та footer-підписи чужих каналів.
+Не розкривай походження матеріалу і не перенось у результат чужий промо/footer
+ні в якому вигляді.
 
 ВИКОРИСТОВУЙ ЛИШЕ ФАКТИ З НАДАНОГО МАТЕРІАЛУ.
 Нічого не вигадуй і не додавай власних оцінок.
@@ -116,11 +120,31 @@ def strip_source_mentions(value, source=""):
         r"(?i)\b(?:за даними|повідомляє|повідомив|зазначає)\s+(?:телеграм[-\s]?канал|канал)\b",
         " ", text,
     )
+
+    # Remove common Telegram channel footer / subscription calls. These are
+    # source promotion, not part of the news.
+    subscribe_words = r"(?:підписатись|підписатися|подписаться|подписаться на канал|subscribe(?:\s+now)?)"
+    text = re.sub(
+        rf"(?im)^[^\n]{{0,120}}\|\s*{subscribe_words}\s*[!…]*\s*$",
+        " ",
+        text,
+    )
+    text = re.sub(
+        rf"(?im)^\s*(?:[|•—–-]\s*)?{subscribe_words}\s*[!…]*\s*$",
+        " ",
+        text,
+    )
+    text = re.sub(
+        rf"(?i)\s*[|•]\s*{subscribe_words}\s*[!…]*(?=\s|$)",
+        " ",
+        text,
+    )
+
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r" *\n *", "\n", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     text = re.sub(r"\s+([,.;:!?])", r"\1", text)
-    return text.strip(" \n—–-:;,")
+    return text.strip(" \n—–-:;,|•")
 
 
 _ALLOWED_TAGS = {"b", "strong", "i", "em", "u", "s", "strike", "blockquote", "code", "pre"}
@@ -292,17 +316,26 @@ class NewsEditor:
         plain_result = _plain(text)
         if original_len >= 120 and len(plain_result) > int(original_len * 1.35) + 80:
             limit = int(original_len * 1.25) + 60
-            words = text.split()
-            kept = []
-            size = 0
-            for word in words:
-                extra = len(word) + (1 if kept else 0)
-                if size + extra > limit:
-                    break
-                kept.append(word)
-                size += extra
-            text = " ".join(kept).strip()
-            # Do not leave an obviously open HTML tag after the hard guard.
+            plain_text = _plain(text)
+
+            # Never cut a news item in the middle of a sentence. Prefer the
+            # last completed sentence within the limit; if there is no safe
+            # boundary, keep the original rather than publishing a fragment.
+            boundaries = [plain_text.rfind(mark, 0, limit + 1) for mark in ".!?…"]
+            boundary = max(boundaries)
+            if boundary >= max(40, int(limit * 0.45)):
+                text = plain_text[:boundary + 1].strip()
+            else:
+                grace_end = min(len(plain_text), limit + 180)
+                candidates = [
+                    plain_text.find(mark, limit, grace_end)
+                    for mark in ".!?…"
+                ]
+                candidates = [pos for pos in candidates if pos != -1]
+                if candidates:
+                    text = plain_text[:min(candidates) + 1].strip()
+
+            # Re-sanitize after the local guard and never leave open HTML.
             text = sanitize_news_html(text, news.source)
 
         importance = max(1, min(10, int(data.get("importance", 1))))
