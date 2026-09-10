@@ -495,10 +495,14 @@ def _clean_telegram_post_text(value, username=""):
             lines.pop()
             continue
 
-        # "Channel Name | Підписатись" / "ТРУХА | Надіслати новину".
+        # A standalone footer such as "Channel Name | Підписатись" may be
+        # removed as a whole, but an inline footer can follow real factual text
+        # on the very same line. Distinguish the two before deleting anything.
         if before.endswith(("|", "•")):
-            lines.pop()
-            continue
+            label = before[:-1].strip()
+            if label and len(label) <= 100 and not re.search(r"[.!?…]", label):
+                lines.pop()
+                continue
 
         # Inline footer after a complete factual sentence.
         boundary = max(before.rfind(mark) for mark in ".!?…")
