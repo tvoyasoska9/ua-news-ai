@@ -79,6 +79,7 @@ class NewsPipeline:
             settings.openai_model,
             settings.max_article_chars,
             settings.max_completion_tokens,
+            settings.ai_max_retries,
         )
 
         self.recent_titles = self.db.get_recent_titles(limit=1000)
@@ -87,6 +88,7 @@ class NewsPipeline:
         self.queue = deque()
         self.queue_keys = set()
         self.queue_events = []
+        self._last_cleanup = datetime.min.replace(tzinfo=timezone.utc)
 
     def _resort_and_trim_queue(self):
         ordered = sorted(self.queue, key=_queue_sort_key)
@@ -121,6 +123,11 @@ class NewsPipeline:
         ]
 
     async def run_once(self):
+        now = datetime.now(timezone.utc)
+        if now - self._last_cleanup >= timedelta(hours=6):
+            self.db.cleanup_history(self.settings.history_retention_days)
+            self._last_cleanup = now
+
         items = await collect_news(self.settings)
 
         telegram_count = sum(1 for item in items if _source_tier(item) == 0)

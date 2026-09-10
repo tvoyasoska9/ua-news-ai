@@ -20,6 +20,19 @@ def bounded_int(name, default, minimum, maximum):
     return max(minimum, min(maximum, value))
 
 
+def int_set(name):
+    values = set()
+    for part in os.getenv(name, "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            values.add(int(part))
+        except ValueError:
+            continue
+    return frozenset(values)
+
+
 @dataclass(frozen=True)
 class Settings:
     telegram_bot_token: str
@@ -38,6 +51,9 @@ class Settings:
     max_article_chars: int
     max_ai_candidates_per_cycle: int
     max_completion_tokens: int
+    moderation_allowed_user_ids: frozenset[int]
+    history_retention_days: int
+    ai_max_retries: int
 
 
 def get_settings():
@@ -69,4 +85,12 @@ def get_settings():
         max_ai_candidates_per_cycle=bounded_int("MAX_AI_CANDIDATES_PER_CYCLE", 1, 1, 2),
         # News posts are short; a hard output cap prevents runaway generations.
         max_completion_tokens=bounded_int("MAX_COMPLETION_TOKENS", 400, 250, 700),
+        # Optional allow-list for moderation callbacks. When empty, the existing
+        # private-chat behavior is preserved; when configured, only these users
+        # can publish or reject.
+        moderation_allowed_user_ids=int_set("MODERATION_ALLOWED_USER_IDS"),
+        # Keep SQLite bounded on a long-running Railway deployment.
+        history_retention_days=bounded_int("HISTORY_RETENTION_DAYS", 30, 7, 180),
+        # Retries are only used for transient API failures.
+        ai_max_retries=bounded_int("AI_MAX_RETRIES", 2, 0, 3),
     )

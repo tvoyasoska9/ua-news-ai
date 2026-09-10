@@ -28,6 +28,11 @@ TELEGRAM_MAX_AGE_HOURS = 1.5
 TELEGRAM_MAX_PER_CHANNEL_PER_POLL = 4
 
 MIN_IMAGE_BYTES = 10_000
+# RSS feeds repeat the same article URLs on every poll. Keep successful article
+# extraction in memory so a one-minute polling interval does not re-download
+# unchanged pages over and over.
+ARTICLE_CACHE_TTL_SECONDS = 30 * 60
+_article_cache = {}
 REQUEST_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                   "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
@@ -235,6 +240,11 @@ async def choose_best_image(session, candidates):
 
 
 async def fetch_article(session, entry, url):
+    now = asyncio.get_running_loop().time()
+    cached = _article_cache.get(url)
+    if cached and cached[0] > now:
+        return cached[1]
+
     try:
         async with session.get(
             url,
@@ -259,7 +269,16 @@ async def fetch_article(session, entry, url):
     published_at = extract_meta_date(soup)
     candidates = extract_image_candidates(entry, soup, final_url)
     image_url = await choose_best_image(session, candidates)
-    return text, published_at, image_url
+    result = (text, published_at, image_url)
+    _article_cache[url] = (now + ARTICLE_CACHE_TTL_SECONDS, result)
+
+    # Prevent an extremely long-running process from retaining an unlimited
+    # number of old URLs in memory.
+    if len(_article_cache) > 2000:
+        expired = [key for key, value in _article_cache.items() if value[0] <= now]
+        for key in expired:
+            _article_cache.pop(key, None)
+    return result
 
 
 async def fetch_source(session, source):
@@ -574,3 +593,17 @@ async def collect_news(settings):
         len(telegram_items), len(rss_items)
     )
     return list(telegram_items) + list(rss_items)
+
+
+async def close_telegram_client():
+    global _telegram_client
+    client = _telegram_client
+    _telegram_client = None
+    if client is None:
+        return
+    try:
+        if client.is_connected():
+            await client.disconnect()
+            log.info("Telegram monitor disconnected")
+    except Exception:
+        log.exception("Failed to disconnect Telegram monitor")
