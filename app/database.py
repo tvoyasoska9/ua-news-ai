@@ -203,10 +203,7 @@ class Database:
         days = max(7, min(int(days), 180))
         since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
         self.conn.execute("DELETE FROM source_metrics WHERE created_at < ?", (since,))
-        self.conn.execute(
-            "DELETE FROM news WHERE created_at < ? AND status != 'moderation'",
-            (since,),
-        )
+        self.conn.execute("DELETE FROM news WHERE created_at < ?", (since,))
         # Pending moderation cards are shorter-lived than the general history.
         self.cleanup_pending(hours=min(days * 24, 168))
         self.conn.commit()
