@@ -125,11 +125,6 @@ def strip_source_mentions(value, source=""):
     # source promotion, not part of the news.
     subscribe_words = r"(?:підписатись|підписатися|подписаться|подписаться на канал|subscribe(?:\s+now)?)"
     text = re.sub(
-        rf"(?im)^[^\n]{{0,120}}\|\s*{subscribe_words}\s*[!…]*\s*$",
-        " ",
-        text,
-    )
-    text = re.sub(
         rf"(?im)^\s*(?:[|•—–-]\s*)?{subscribe_words}\s*[!…]*\s*$",
         " ",
         text,
