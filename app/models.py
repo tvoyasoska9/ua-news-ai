@@ -16,6 +16,7 @@ class RawNews:
     media_paths: Sequence[str] = field(default_factory=list)  # all media in original post/album
     media_types: Sequence[str] = field(default_factory=list)  # matching types for media_paths
     media_messages: Sequence[object] = field(default_factory=list, repr=False)  # deferred Telegram media
+    rss_entry: Optional[object] = field(default=None, repr=False)  # deferred RSS article metadata
 
 
 @dataclass
