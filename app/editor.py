@@ -90,8 +90,13 @@ TELEGRAM_URL_RE = re.compile(
 )
 MENTION_RE = re.compile(r"(?<!\w)@[A-Za-z0-9_]{3,}\b")
 PROMO_LINE_RE = re.compile(
-    r"(?im)^\s*(?:[^\n]{0,120}?[|•])?\s*(?:підписатись|підписатися|подписаться(?:\s+на\s+канал)?|subscribe(?:\s+now)?)\s*[!…]*\s*$"
+    r"(?im)^\s*(?:[^\n]{0,120}?[|•])?\s*(?:підписатись|підписатися|подписаться(?:\s+на\s+канал)?|subscribe(?:\s+now)?|надіслати\s+новину|прислать\s+новость|send\s+news)\s*[!…]*\s*$"
 )
+PROMO_CTA_RE = re.compile(
+    r"(?i)(?:підписатись|підписатися|подписаться(?:\s+на\s+канал)?|subscribe(?:\s+now)?|"
+    r"надіслати\s+новину|прислать\s+новость|send\s+news)"
+)
+GENERIC_TITLES = {"новина", "news", "новости", "повідомлення", "повідомлення дня"}
 
 
 def _source_aliases(source):
@@ -134,21 +139,28 @@ def strip_source_mentions(value, source=""):
         lines.append(line)
     text = "\n".join(lines)
 
-    # Inline footer variants at the end of an otherwise normal line.
+    # Remove complete trailing channel footers, not just the final CTA.
+    # Examples:
+    # "Україна Online | Підписатись"
+    # "ТРУХА⚡️Україна | Надіслати новину"
+    # The pattern is anchored to the end, so factual text before the footer is kept.
+    promo_words = (
+        r"(?:підписатись|підписатися|подписаться(?:\\s+на\\s+канал)?|subscribe(?:\\s+now)?|"
+        r"надіслати\\s+новину|прислать\\s+новость|send\\s+news)"
+    )
     text = re.sub(
-        r"(?i)\s*(?:[|•—–-]\s*)[^\n|•]{1,100}?\s*[|•]\s*"
-        r"(?:підписатись|підписатися|подписаться(?:\s+на\s+канал)?|subscribe(?:\s+now)?)"
-        r"\s*[!…]*\s*$",
+        rf"(?i)\\s*[^\\n|•]{{1,140}}?\\s*[|•]\\s*{promo_words}\\s*[!…]*\\s*$",
         "",
         text,
     )
     text = re.sub(
-        r"(?i)\s*[|•—–-]\s*"
-        r"(?:підписатись|підписатися|подписаться(?:\s+на\s+канал)?|subscribe(?:\s+now)?)"
-        r"\s*[!…]*(?=\s|$)",
+        rf"(?i)\\s*[|•—–-]\\s*{promo_words}\\s*[!…]*(?=\\s|$)",
         " ",
         text,
     )
+    # If a source puts the CTA on a separate tail without a separator, remove
+    # only the CTA itself; never delete the factual sentence before it.
+    text = re.sub(rf"(?i)\\s+{promo_words}\\s*[!…]*\\s*$", "", text)
 
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r" *\n *", "\n", text)
@@ -214,6 +226,25 @@ def _plain(value):
 def _first_paragraph(value):
     parts = re.split(r"\n\s*\n+", _plain(value))
     return next((part.strip() for part in parts if part.strip()), "")
+
+
+def _fallback_title_from_material(value):
+    """Use the first factual sentence when the model returns a useless generic title."""
+    text = _plain(value)
+    text = strip_source_mentions(text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        return ""
+    match = re.search(r"^(.{1,260}?[.!?…])(?:\s|$)", text)
+    if match:
+        return match.group(1).strip()
+    return text[:220].rstrip(" ,;:—–-")
+
+
+def _is_usable_title(value):
+    plain = _plain(value).strip()
+    normalized = re.sub(r"\s+", " ", plain.lower()).strip(" .!?:;—–-")
+    return len(plain) >= 12 and normalized not in GENERIC_TITLES
 
 
 def _title_repeated_in_body(title, body):
@@ -338,7 +369,12 @@ class NewsEditor:
         ])
 
         data = json.loads(response.choices[0].message.content or "{}")
-        title = strip_source_mentions(data.get("title") or news.title, news.source)
+        title = strip_source_mentions(data.get("title") or "", news.source)
+        # "Новина" is never an acceptable replacement for a real short source
+        # post. If the model loses the headline during sanitization, preserve
+        # the first factual sentence from the already-clean original material.
+        if not _is_usable_title(title):
+            title = _fallback_title_from_material(material)
         text = sanitize_news_html(data.get("text") or "", news.source)
         text = sanitize_news_html(_finish_at_sentence_boundary(text), news.source)
         event_key = strip_source_mentions(data.get("event_key") or title or news.title, news.source)
@@ -385,7 +421,7 @@ class NewsEditor:
             confidence = "medium"
 
         return EditedNews(
-            title=title or "Новина",
+            title=title or _fallback_title_from_material(material) or "Новина",
             text=text,
             category=str(data.get("category") or "Інше").strip(),
             importance=importance,
