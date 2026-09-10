@@ -574,3 +574,17 @@ async def collect_news(settings):
         len(telegram_items), len(rss_items)
     )
     return list(telegram_items) + list(rss_items)
+
+
+async def close_telegram_client():
+    global _telegram_client
+    client = _telegram_client
+    _telegram_client = None
+    if client is None:
+        return
+    try:
+        if client.is_connected():
+            await client.disconnect()
+            log.info("Telegram monitor disconnected")
+    except Exception:
+        log.exception("Failed to disconnect Telegram monitor")
