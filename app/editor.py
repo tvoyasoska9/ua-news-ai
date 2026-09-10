@@ -340,7 +340,7 @@ class NewsEditor:
         data = json.loads(response.choices[0].message.content or "{}")
         title = strip_source_mentions(data.get("title") or news.title, news.source)
         text = sanitize_news_html(data.get("text") or "", news.source)
-        text = _finish_at_sentence_boundary(text)
+        text = sanitize_news_html(_finish_at_sentence_boundary(text), news.source)
         event_key = strip_source_mentions(data.get("event_key") or title or news.title, news.source)
 
         # Never pay for a second AI call just because the model repeated the
