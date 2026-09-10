@@ -455,6 +455,86 @@ def telegram_formatted_text(message):
         return raw
 
 
+_TELEGRAM_PROMO_RE = re.compile(
+    r"(?iu)(?:"
+    r"підписатись|підписатися|підписуйся(?:\s+на\s+[^\n|•]{1,80})?|"
+    r"подписаться(?:\s+на\s+канал)?|subscribe(?:\s+now)?|"
+    r"надіслати\s+новину|прислать\s+новость|send\s+news"
+    r")"
+)
+
+
+def _clean_telegram_post_text(value, username=""):
+    """Remove only trailing channel branding/CTA before the AI ever sees it.
+
+    Telegram channels frequently append the channel name and a subscription or
+    "send news" call-to-action on the same line as the factual post.  This is
+    source noise, not news, so it must be removed at collection time rather
+    than hoping the model will ignore it.
+    """
+    lines = [line.strip() for line in str(value or "").splitlines()]
+    lines = [line for line in lines if line]
+    if not lines:
+        return ""
+
+    while lines:
+        last = lines[-1]
+        matches = list(_TELEGRAM_PROMO_RE.finditer(last))
+        if not matches:
+            break
+
+        match = matches[-1]
+        # Only a trailing CTA is promotional. Never delete factual text after a
+        # CTA that appears in the middle of a legitimate sentence.
+        tail = last[match.end():].strip(" \t.!…‼️❗️")
+        if tail:
+            break
+
+        before = last[:match.start()].rstrip()
+        if not before:
+            lines.pop()
+            continue
+
+        # "Channel Name | Підписатись" / "ТРУХА | Надіслати новину".
+        if before.endswith(("|", "•")):
+            lines.pop()
+            continue
+
+        # Inline footer after a complete factual sentence.
+        boundary = max(before.rfind(mark) for mark in ".!?…")
+        if boundary >= 0:
+            lines[-1] = before[:boundary + 1].rstrip()
+            break
+
+        # No safe sentence boundary: remove only the CTA and keep the factual
+        # part rather than dropping the entire post.
+        lines[-1] = before.rstrip(" |•—–-")
+        break
+
+    # A source username can occasionally be copied as a standalone final line.
+    if username:
+        aliases = {
+            username.lower().lstrip("@"),
+            ("@" + username.lower().lstrip("@")),
+        }
+        while lines and lines[-1].lower().strip() in aliases:
+            lines.pop()
+
+    return "\n".join(lines).strip()
+
+
+def _telegram_candidate_title(plain_text):
+    """Build metadata from the first factual line without truncating the post."""
+    lines = [line.strip() for line in str(plain_text or "").splitlines() if line.strip()]
+    if not lines:
+        return ""
+    first = lines[0]
+    sentence = _trim_plain_to_sentence_boundary(first, 260)
+    if sentence:
+        return " ".join(sentence.split())
+    return " ".join(first.split())[:260].rstrip(" ,;:—–-")
+
+
 async def _download_telegram_media(client, username, messages):
     media_paths, media_types = [], []
     media_dir = Path(os.getenv("TELEGRAM_MEDIA_DIR", "/tmp/ua-news-media"))
@@ -518,7 +598,12 @@ async def fetch_telegram_source(client, source):
     deferred_media = 0
     for group in groups:
         group.sort(key=lambda m: m.id)
-        text = next((telegram_formatted_text(m) for m in group if telegram_formatted_text(m)), "")
+        text = ""
+        for message in group:
+            candidate = telegram_formatted_text(message)
+            if candidate:
+                text = candidate
+                break
         if not text:
             continue
 
@@ -530,9 +615,16 @@ async def fetch_telegram_source(client, source):
             if m.photo or m.video or (m.document and getattr(m.document, "mime_type", "").startswith("video/"))
         ]
         deferred_media += len(supported_media)
+
+        # Cleanup happens here, before title generation and before OpenAI.
+        # This prevents channel branding such as "ТРУХА | Надіслати новину"
+        # from contaminating either the metadata or the model input.
         plain_text = BeautifulSoup(text, "html.parser").get_text("\n", strip=True)
-        plain_text = "\n".join(line.strip() for line in plain_text.splitlines() if line.strip())
-        title = " ".join(plain_text.split())[:180]
+        plain_text = _clean_telegram_post_text(plain_text, username)
+        if not plain_text:
+            continue
+
+        title = _telegram_candidate_title(plain_text)
         summary = _trim_plain_to_sentence_boundary(plain_text, MAX_ARTICLE_CHARS)
         items.append(RawNews(
             title=title,
