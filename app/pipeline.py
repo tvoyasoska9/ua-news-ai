@@ -3,7 +3,7 @@ import logging
 from collections import deque
 from datetime import datetime, timedelta, timezone
 
-from app.collector import collect_news, fingerprint, materialize_telegram_media
+from app.collector import collect_news, fingerprint, materialize_news
 from app.dedup import is_similar_title, is_duplicate_event
 from app.editor import NewsEditor
 
@@ -186,8 +186,18 @@ class NewsPipeline:
 
             try:
                 # All cheap screening is complete. Only the selected candidate
-                # may now download Telegram media.
-                await materialize_telegram_media(raw)
+                # may now download expensive source data (Telegram media or a
+                # full RSS article and image).
+                await materialize_news(raw)
+
+                # Some RSS feeds omit publication dates. If the article page
+                # reveals an old publication time, stop here before spending an
+                # OpenAI request.
+                if _is_too_old(raw.published_at):
+                    self.db.set_status(raw.url, "stale")
+                    _cleanup_media(raw.media_path, raw.media_paths)
+                    continue
+
                 edited = await self.editor.edit(raw)
             except Exception:
                 log.exception("AI editing failed")
