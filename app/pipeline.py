@@ -78,6 +78,7 @@ class NewsPipeline:
             settings.openai_api_key,
             settings.openai_model,
             settings.max_article_chars,
+            settings.max_completion_tokens,
         )
 
         self.recent_titles = self.db.get_recent_titles(limit=1000)
