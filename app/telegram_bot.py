@@ -1,4 +1,5 @@
 from datetime import datetime
+import re
 from html import escape
 from io import BytesIO
 import logging
@@ -152,13 +153,18 @@ class NewsBot:
 
     def publish_text(self, item):
         title, body = self._public_body(item)
-        # Exactly one empty line before the channel signature.
-        body = body.rstrip()
-        return (
-            f"<b>{title}</b>\n\n"
-            f"{body}\n\n"
-            f'<b><a href="https://t.me/ukr24live">УКРАЇНА 🇺🇦 LIVE 24</a></b>'
-        )
+
+        # Normalize all accidental extra line breaks before publication.
+        # The channel signature must always have exactly one empty line before it.
+        title = re.sub(r"\n{2,}", "\n", title).strip()
+        body = re.sub(r"\n{3,}", "\n\n", body).strip()
+
+        signature = '<b><a href="https://t.me/ukr24live">УКРАЇНА 🇺🇦 LIVE 24</a></b>'
+        parts = [f"<b>{title}</b>"]
+        if body:
+            parts.append(body)
+
+        return "\n\n".join(parts + [signature])
 
     def keyboard(self, item_id):
         return InlineKeyboardMarkup([[
