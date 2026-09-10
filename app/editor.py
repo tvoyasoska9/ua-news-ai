@@ -88,9 +88,9 @@ TELEGRAM_SOURCE_RE = re.compile(
 TELEGRAM_URL_RE = re.compile(
     r"(?i)(?:https?://)?(?:www\.)?(?:t\.me|telegram\.me)/[A-Za-z0-9_./?=&%-]+"
 )
-MENTION_RE = re.compile(r"(?<!\\w)@[A-Za-z0-9_]{3,}\\b")
+MENTION_RE = re.compile(r"(?<!\w)@[A-Za-z0-9_]{3,}\b")
 PROMO_LINE_RE = re.compile(
-    r"(?im)^\\s*(?:[^\\n]{0,120}?[|•])?\\s*(?:підписатись|підписатися|подписаться(?:\\s+на\\s+канал)?|subscribe(?:\\s+now)?)\\s*[!…]*\\s*$"
+    r"(?im)^\s*(?:[^\n]{0,120}?[|•])?\s*(?:підписатись|підписатися|подписаться(?:\s+на\s+канал)?|subscribe(?:\s+now)?)\s*[!…]*\s*$"
 )
 
 
@@ -136,21 +136,21 @@ def strip_source_mentions(value, source=""):
 
     # Inline footer variants at the end of an otherwise normal line.
     text = re.sub(
-        r"(?i)\\s*(?:[|•—–-]\\s*)[^\\n|•]{1,100}?\\s*[|•]\\s*"
-        r"(?:підписатись|підписатися|подписаться(?:\\s+на\\s+канал)?|subscribe(?:\\s+now)?)"
-        r"\\s*[!…]*\\s*$",
+        r"(?i)\s*(?:[|•—–-]\s*)[^\n|•]{1,100}?\s*[|•]\s*"
+        r"(?:підписатись|підписатися|подписаться(?:\s+на\s+канал)?|subscribe(?:\s+now)?)"
+        r"\s*[!…]*\s*$",
         "",
         text,
     )
     text = re.sub(
-        r"(?i)\\s*[|•—–-]\\s*"
-        r"(?:підписатись|підписатися|подписаться(?:\\s+на\\s+канал)?|subscribe(?:\\s+now)?)"
-        r"\\s*[!…]*(?=\\s|$)",
+        r"(?i)\s*[|•—–-]\s*"
+        r"(?:підписатись|підписатися|подписаться(?:\s+на\s+канал)?|subscribe(?:\s+now)?)"
+        r"\s*[!…]*(?=\s|$)",
         " ",
         text,
     )
 
-    text = re.sub(r"[ \\t]+", " ", text)
+    text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r" *\n *", "\n", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     text = re.sub(r"\s+([,.;:!?])", r"\1", text)
