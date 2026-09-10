@@ -423,6 +423,26 @@ async def get_telegram_client(settings):
         return _telegram_client
 
 
+def _trim_plain_to_sentence_boundary(value, limit):
+    """Limit AI input without cutting a Telegram post in the middle of a sentence."""
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+
+    boundary = max(text.rfind(mark, 0, limit + 1) for mark in ".!?…")
+    if boundary >= max(40, int(limit * 0.45)):
+        return text[:boundary + 1].rstrip()
+
+    grace_end = min(len(text), limit + 240)
+    candidates = [text.find(mark, limit, grace_end) for mark in ".!?…"]
+    candidates = [pos for pos in candidates if pos != -1]
+    if candidates:
+        return text[:min(candidates) + 1].rstrip()
+
+    # A broken fact is worse than a slightly longer prompt.
+    return text
+
+
 def telegram_formatted_text(message):
     """Return Telegram message text with its original formatting as safe HTML."""
     raw = (message.message or "").strip()
@@ -510,10 +530,13 @@ async def fetch_telegram_source(client, source):
             if m.photo or m.video or (m.document and getattr(m.document, "mime_type", "").startswith("video/"))
         ]
         deferred_media += len(supported_media)
-        title = " ".join(BeautifulSoup(text, "html.parser").get_text(" ", strip=True).split())[:180]
+        plain_text = BeautifulSoup(text, "html.parser").get_text("\n", strip=True)
+        plain_text = "\n".join(line.strip() for line in plain_text.splitlines() if line.strip())
+        title = " ".join(plain_text.split())[:180]
+        summary = _trim_plain_to_sentence_boundary(plain_text, MAX_ARTICLE_CHARS)
         items.append(RawNews(
             title=title,
-            summary=text[:MAX_ARTICLE_CHARS],
+            summary=summary,
             url=f"https://t.me/{username}/{first.id}",
             source=f"Telegram: @{username}",
             priority=source.get("priority", 100),
