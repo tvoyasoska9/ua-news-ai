@@ -304,11 +304,11 @@ async def fetch_source(session, source):
         if not title or not url:
             return None
 
-        article_text, article_date, image_url = await fetch_article(session, entry, url)
-
-        material = article_text if len(article_text) >= 200 else summary
-        if not material:
-            material = title
+        # Keep RSS collection cheap: the feed itself already gives us enough
+        # metadata for URL/title/date duplicate screening. Do not download the
+        # full article or probe images until this candidate actually survives
+        # all local filters and is selected for AI processing.
+        material = summary or title
 
         return RawNews(
             title=title,
@@ -316,8 +316,8 @@ async def fetch_source(session, source):
             url=url,
             source=source["name"],
             priority=source.get("priority", 5),
-            image_url=image_url,
-            published_at=article_date or extract_rss_date(entry),
+            published_at=extract_rss_date(entry),
+            rss_entry=entry,
         )
 
     items = await asyncio.gather(
@@ -325,6 +325,47 @@ async def fetch_source(session, source):
         return_exceptions=True,
     )
     return [item for item in items if isinstance(item, RawNews)]
+
+
+async def materialize_rss_article(news):
+    """Download the full RSS article only after the candidate passes local screening."""
+    if news.rss_entry is None:
+        return news
+
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; UA-News-AI/1.2)"}
+    timeout = aiohttp.ClientTimeout(total=30)
+    connector = aiohttp.TCPConnector(limit=8)
+
+    async with aiohttp.ClientSession(
+        headers=headers,
+        connector=connector,
+        timeout=timeout,
+    ) as session:
+        article_text, article_date, image_url = await fetch_article(
+            session,
+            news.rss_entry,
+            news.url,
+        )
+
+    if article_text:
+        news.summary = article_text
+    if article_date and not news.published_at:
+        news.published_at = article_date
+    if image_url:
+        news.image_url = image_url
+
+    # Drop the feed entry after materialization so queued objects do not retain
+    # unnecessary parser metadata in memory.
+    news.rss_entry = None
+    log.info("Materialized full RSS article only for selected candidate: %s", news.url)
+    return news
+
+
+async def materialize_news(news):
+    """Materialize expensive source data only for the selected AI candidate."""
+    await materialize_telegram_media(news)
+    await materialize_rss_article(news)
+    return news
 
 
 async def collect_rss_news():
