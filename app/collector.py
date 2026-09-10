@@ -18,7 +18,7 @@ from app.sources import RSS_SOURCES, TELEGRAM_SOURCES
 
 log = logging.getLogger(__name__)
 
-MAX_ARTICLE_CHARS = int(os.getenv("MAX_ARTICLE_CHARS", "7000"))
+MAX_ARTICLE_CHARS = int(os.getenv("MAX_ARTICLE_CHARS", "5000"))
 RSS_POST_LIMIT = 10
 
 # Real-time first. We inspect only a small recent window on every poll so a
