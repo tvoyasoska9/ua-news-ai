@@ -394,11 +394,46 @@ def telegram_formatted_text(message):
         return raw
 
 
+async def _download_telegram_media(client, username, messages):
+    media_paths, media_types = [], []
+    media_dir = Path(os.getenv("TELEGRAM_MEDIA_DIR", "/tmp/ua-news-media"))
+    media_dir.mkdir(parents=True, exist_ok=True)
+    for index, message in enumerate(messages, start=1):
+        media_type = "photo" if message.photo else None
+        if message.video or (message.document and getattr(message.document, "mime_type", "").startswith("video/")):
+            media_type = "video"
+        if not media_type:
+            continue
+        try:
+            suffix = ".mp4" if media_type == "video" else ".jpg"
+            target = media_dir / f"{username}_{message.id}_{index}{suffix}"
+            result = await client.download_media(message, file=str(target))
+            if result:
+                media_paths.append(str(result))
+                media_types.append(media_type)
+        except Exception:
+            log.exception("Failed to download Telegram media from @%s message %s", username, message.id)
+    return media_paths, media_types
+
+
+async def materialize_telegram_media(news):
+    if not news.source.startswith("Telegram:") or not news.media_messages:
+        return news
+    client = _telegram_client
+    if client is None or not client.is_connected():
+        raise RuntimeError("Telegram monitor is not connected")
+    username = news.source.split("@", 1)[-1].strip()
+    paths, types = await _download_telegram_media(client, username, news.media_messages)
+    news.media_paths = paths
+    news.media_types = types
+    news.media_path = paths[0] if paths else None
+    news.media_type = "album" if len(paths) > 1 else (types[0] if types else None)
+    log.info("Downloaded %s media files only for selected candidate @%s", len(paths), username)
+    return news
+
+
 async def fetch_telegram_source(client, source):
-    """
-    Collect Telegram posts while treating every grouped_id album as ONE news item.
-    All photos/videos belonging to the album are downloaded and kept in order.
-    """
+    """Collect text and metadata first; defer all media downloads."""
     username = source["username"]
     try:
         entity = await client.get_entity(username)
@@ -408,16 +443,10 @@ async def fetch_telegram_source(client, source):
         return []
 
     now_utc = datetime.now(timezone.utc)
-
-    # Build logical posts: grouped_id => one album; ordinary messages stay alone.
-    groups = []
-    by_group = {}
+    groups, by_group = [], {}
     for message in messages:
-        if message.date:
-            msg_time = message.date.astimezone(timezone.utc)
-            if msg_time < now_utc - timedelta(hours=TELEGRAM_MAX_AGE_HOURS):
-                continue
-
+        if message.date and message.date.astimezone(timezone.utc) < now_utc - timedelta(hours=TELEGRAM_MAX_AGE_HOURS):
+            continue
         key = ("album", message.grouped_id) if message.grouped_id else ("message", message.id)
         if key not in by_group:
             by_group[key] = []
@@ -425,102 +454,35 @@ async def fetch_telegram_source(client, source):
         by_group[key].append(message)
 
     items = []
-    media_count = 0
-
+    deferred_media = 0
     for group in groups:
-        # Telegram may return album parts in reverse/newest order. Preserve the
-        # original message order for the published media group.
         group.sort(key=lambda m: m.id)
-        text = ""
-        for message in group:
-            candidate = telegram_formatted_text(message)
-            if candidate:
-                text = candidate
-                break
-
-        has_media = any(m.media for m in group)
-        if not text and not has_media:
+        text = next((telegram_formatted_text(m) for m in group if telegram_formatted_text(m)), "")
+        if not text:
             continue
 
         first = group[0]
-        published_at = (
-            min(m.date for m in group if m.date).astimezone(timezone.utc).isoformat()
-            if any(m.date for m in group) else None
-        )
-        message_id = first.id
-        url = f"https://t.me/{username}/{message_id}"
-
-        media_paths = []
-        media_types = []
-        media_dir = Path(os.getenv("TELEGRAM_MEDIA_DIR", "/tmp/ua-news-media"))
-        media_dir.mkdir(parents=True, exist_ok=True)
-
-        for index, message in enumerate(group, start=1):
-            media_type = None
-            if message.photo:
-                media_type = "photo"
-            elif message.video or (
-                message.document
-                and getattr(message.document, "mime_type", "").startswith("video/")
-            ):
-                media_type = "video"
-
-            if not media_type:
-                continue
-
-            try:
-                suffix = ".mp4" if media_type == "video" else ".jpg"
-                target = media_dir / f"{username}_{message.id}_{index}{suffix}"
-                result = await client.download_media(message, file=str(target))
-                if result:
-                    media_paths.append(str(result))
-                    media_types.append(media_type)
-                    media_count += 1
-            except Exception:
-                log.exception(
-                    "Failed to download %s from @%s message %s",
-                    media_type, username, message.id
-                )
-
-        # The current editor needs factual text. A pure media post cannot be
-        # safely rewritten, so clean downloaded files and skip it.
-        if not text:
-            for path in media_paths:
-                try:
-                    Path(path).unlink(missing_ok=True)
-                except Exception:
-                    pass
-            continue
-
+        published_at = min((m.date for m in group if m.date), default=None)
+        published_at = published_at.astimezone(timezone.utc).isoformat() if published_at else None
+        supported_media = [
+            m for m in group
+            if m.photo or m.video or (m.document and getattr(m.document, "mime_type", "").startswith("video/"))
+        ]
+        deferred_media += len(supported_media)
         title = " ".join(BeautifulSoup(text, "html.parser").get_text(" ", strip=True).split())[:180]
-        primary_type = (
-            "album" if len(media_paths) > 1
-            else (media_types[0] if media_types else None)
-        )
-
-        items.append(
-            RawNews(
-                title=title,
-                summary=text[:MAX_ARTICLE_CHARS],
-                url=url,
-                source=f"Telegram: @{username}",
-                priority=source.get("priority", 100),
-                image_url=None,
-                published_at=published_at,
-                media_type=primary_type,
-                media_path=media_paths[0] if media_paths else None,
-                media_paths=media_paths,
-                media_types=media_types,
-            )
-        )
-
+        items.append(RawNews(
+            title=title,
+            summary=text[:MAX_ARTICLE_CHARS],
+            url=f"https://t.me/{username}/{first.id}",
+            source=f"Telegram: @{username}",
+            priority=source.get("priority", 100),
+            published_at=published_at,
+            media_messages=supported_media,
+        ))
         if len(items) >= TELEGRAM_MAX_PER_CHANNEL_PER_POLL:
             break
 
-    log.info(
-        "Telegram source @%s checked: %s logical posts collected, %s media files preserved",
-        username, len(items), media_count
-    )
+    log.info("Telegram source @%s checked: %s posts, %s media files deferred", username, len(items), deferred_media)
     return items
 
 async def collect_telegram_news(settings):
