@@ -139,38 +139,94 @@ class ModerationBot:
         cached, _ = await self._send_local_media(
             self.settings.moderation_chat_id, media, caption, self.keyboard(item_id)
         )
-        self.db.save_pending(item_id, item.title, item.text, raw.url, cached)
+        # Keep the original downloaded source files for publication. The
+        # moderation copy is only a preview/cache; publishing from its file_id
+        # can use Telegram's processed variant instead of the original upload.
+        self.db.save_pending(
+            item_id, item.title, item.text, raw.url,
+            {
+                "cached": cached,
+                "local": [[path, kind] for path, kind in media],
+            },
+        )
 
     async def _publish_media(self, media, caption):
-        if not media:
+        # IMPORTANT: prefer the untouched files downloaded directly from the
+        # source channel. The Bot API file_id created for moderation can refer
+        # to Telegram's processed/transcoded copy.
+        local = []
+        cached = []
+
+        if isinstance(media, dict):
+            local = [
+                (str(entry[0]), str(entry[1]))
+                for entry in (media.get("local") or [])
+                if isinstance(entry, (list, tuple)) and len(entry) == 2
+                and Path(str(entry[0])).exists()
+                and str(entry[1]) in {"photo", "video"}
+            ]
+            cached = [
+                (str(entry[0]), str(entry[1]))
+                for entry in (media.get("cached") or [])
+                if isinstance(entry, (list, tuple)) and len(entry) == 2
+                and str(entry[1]) in {"photo", "video"}
+            ]
+        else:
+            # Backward compatibility with already-created moderation cards.
+            cached = list(media or [])
+
+        if local:
+            # Re-upload the original source bytes directly to the publication
+            # channel. Do not reuse the moderation preview's cached file_id.
+            await self._send_local_media(
+                self.settings.publish_channel_id, local, caption, None
+            )
+            return
+
+        if not cached:
             await self.app.bot.send_message(
                 self.settings.publish_channel_id, caption,
                 parse_mode="HTML", disable_web_page_preview=True
             )
             return
 
-        if len(media) == 1 and len(caption) <= CAPTION_LIMIT:
-            fid, kind = media[0]
+        if len(cached) == 1 and len(caption) <= CAPTION_LIMIT:
+            fid, kind = cached[0]
             if kind == "photo":
                 await self.app.bot.send_photo(
                     self.settings.publish_channel_id, fid, caption=caption, parse_mode="HTML"
                 )
             else:
                 await self.app.bot.send_video(
-                    self.settings.publish_channel_id, fid, caption=caption, parse_mode="HTML"
+                    self.settings.publish_channel_id, fid, caption=caption,
+                    parse_mode="HTML", supports_streaming=True
                 )
             return
 
         payload = []
-        for index, (fid, kind) in enumerate(media):
+        for index, (fid, kind) in enumerate(cached):
             kwargs = {"caption": caption, "parse_mode": "HTML"} if index == 0 and len(caption) <= CAPTION_LIMIT else {}
-            payload.append(InputMediaVideo(fid, **kwargs) if kind == "video" else InputMediaPhoto(fid, **kwargs))
+            payload.append(
+                InputMediaVideo(fid, supports_streaming=True, **kwargs)
+                if kind == "video" else InputMediaPhoto(fid, **kwargs)
+            )
         await self.app.bot.send_media_group(self.settings.publish_channel_id, payload)
         if len(caption) > CAPTION_LIMIT:
             await self.app.bot.send_message(
                 self.settings.publish_channel_id, caption,
                 parse_mode="HTML", disable_web_page_preview=True
             )
+
+    def _cleanup_original_media(self, media):
+        if not isinstance(media, dict):
+            return
+        for entry in media.get("local") or []:
+            if not isinstance(entry, (list, tuple)) or len(entry) != 2:
+                continue
+            try:
+                Path(str(entry[0])).unlink(missing_ok=True)
+            except Exception:
+                log.exception("failed to remove temporary source media")
 
     async def callback(self, update, context):
         q = update.callback_query
@@ -186,6 +242,7 @@ class ModerationBot:
         await q.answer()
         if action == "reject":
             self.db.set_status(data["url"], "rejected")
+            self._cleanup_original_media(data.get("media"))
             self.db.delete_pending(item_id)
             await q.edit_message_reply_markup(reply_markup=None)
             return
@@ -198,6 +255,7 @@ class ModerationBot:
                 self.render(data["title"], data["text"], include_signature=True),
             )
             self.db.set_status(data["url"], "published")
+            self._cleanup_original_media(data.get("media"))
             self.db.delete_pending(item_id)
             await q.edit_message_reply_markup(reply_markup=None)
         except Exception:
