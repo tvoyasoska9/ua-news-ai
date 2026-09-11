@@ -119,7 +119,7 @@ class Database:
         Transient/API failures and deterministic quality failures are retryable;
         otherwise one bad model response would permanently erase a real news item.
         """
-        retryable = {"error", "error_retry", "quality_failed_retry", "quality_retry_pending", "processing"}
+        retryable = {"error", "error_retry", "quality_failed_retry", "quality_retry_pending", "processing", "daily_model_limit"}
         if fingerprint:
             rows = self.conn.execute(
                 "SELECT url,status FROM news WHERE url=? OR fingerprint=?",
