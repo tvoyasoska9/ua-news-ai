@@ -256,10 +256,78 @@ def _fallback_title_from_material(value):
     return text[:220].rstrip(" ,;:—–-")
 
 
+def _is_complete_statement(value):
+    plain = _plain(value).strip()
+    if not plain:
+        return False
+    if plain[-1] in ".!?…»”)]}":
+        return True
+    # Headlines may legitimately omit a final period, but must not end in a
+    # dangling connector, dash, colon, or obviously unfinished word fragment.
+    if plain.endswith(("—", "–", "-", ":", ",", ";", "…")):
+        return False
+    tail = plain.split()[-1].lower()
+    if tail in {"і", "й", "та", "або", "але", "що", "який", "яка", "яке", "які", "для", "після", "через", "про", "у", "в", "на", "до", "від", "з", "із", "за"}:
+        return False
+    return len(plain) >= 18
+
+
 def _is_usable_title(value):
     plain = _plain(value).strip()
     normalized = re.sub(r"\s+", " ", plain.lower()).strip(" .!?:;—–-")
-    return len(plain) >= 12 and normalized not in GENERIC_TITLES
+    return (
+        len(plain) >= 12
+        and normalized not in GENERIC_TITLES
+        and _is_complete_statement(plain)
+    )
+
+
+def _normalized_tokens(value):
+    return re.findall(r"(?u)\b[\w’'-]+\b", _plain(value).lower())
+
+
+def _has_excessive_source_copy(title, text, material, source_title=""):
+    """Catch copying at title/sentence level, including short Telegram posts."""
+    result = _plain(f"{title}\n{text}")
+    source = _plain(material)
+    source_headline = _plain(source_title)
+
+    if not result or not source:
+        return False
+
+    # A copied headline alone is already unacceptable for a rewritten post.
+    if source_headline and len(_normalized_tokens(title)) >= 7:
+        headline_ratio = fuzz.ratio(
+            re.sub(r"\s+", " ", _plain(title).lower()),
+            re.sub(r"\s+", " ", source_headline.lower()),
+        )
+        headline_tokens = fuzz.token_set_ratio(
+            _plain(title).lower(), source_headline.lower()
+        )
+        if headline_ratio >= 90 or headline_tokens >= 96:
+            return True
+
+    source_norm = re.sub(r"\s+", " ", source.lower()).strip()
+    result_norm = re.sub(r"\s+", " ", result.lower()).strip()
+    if len(_normalized_tokens(result)) >= 12:
+        ratio = fuzz.ratio(source_norm, result_norm)
+        token_ratio = fuzz.token_set_ratio(source_norm, result_norm)
+        if ratio >= 80 and token_ratio >= 88:
+            return True
+
+    # Reject any long verbatim fragment copied from the source.
+    result_tokens = _normalized_tokens(result)
+    source_tokens = _normalized_tokens(source)
+    if len(result_tokens) >= 14 and len(source_tokens) >= 14:
+        source_ngrams = {
+            tuple(source_tokens[i:i+10])
+            for i in range(len(source_tokens) - 9)
+        }
+        for i in range(len(result_tokens) - 9):
+            if tuple(result_tokens[i:i+10]) in source_ngrams:
+                return True
+
+    return False
 
 
 def _word_count(value):
@@ -275,21 +343,26 @@ def _meaningful_paragraphs(value):
 
 
 def _coverage_too_low(title, text, material):
-    """Reject only catastrophic truncation, not normal semantic compression."""
+    """Reject outputs that collapse a real post into a fragment or headline."""
     original_words = _word_count(material)
-    if original_words < 70:
-        return False
-
     result_words = _word_count(title) + _word_count(text)
     source_paragraphs = _meaningful_paragraphs(material)
 
-    # Word count is not factual coverage. A concise but complete rewrite is valid.
-    if result_words < max(24, int(original_words * 0.18)):
+    if original_words < 25:
+        return False
+
+    # Short Telegram posts are exactly where the old <70-word bypass allowed
+    # broken one-line outputs through. Do not allow a factual post to become
+    # only a headline.
+    minimum = max(18, int(original_words * 0.28))
+    if result_words < minimum:
         return True
 
-    # Paragraph merging is allowed. Flag only a genuinely tiny result from a
-    # clearly long multi-paragraph source.
-    if len(source_paragraphs) >= 5 and _word_count(text) < 35:
+    # If the source contains several meaningful blocks, an empty/tiny body is
+    # not sufficient coverage even when the headline is long.
+    if len(source_paragraphs) >= 2 and _word_count(text) < 12:
+        return True
+    if len(source_paragraphs) >= 4 and _word_count(text) < 28:
         return True
 
     return False
@@ -457,6 +530,9 @@ class NewsEditor:
         # not normal concise semantic rewriting.
         if _material_coverage_too_low(title, text, material):
             raise ValueError("AI output catastrophically truncated the material")
+
+        if _has_excessive_source_copy(title, text, material, news.title):
+            raise ValueError("AI output contains excessive verbatim copying from the source")
 
         if _is_near_verbatim_copy(title, text, material):
             raise ValueError("AI output is too close to the original wording")
