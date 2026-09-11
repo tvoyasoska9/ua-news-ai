@@ -431,8 +431,12 @@ def _finish_at_sentence_boundary(value):
     return ""
 
 
+class QualityError(ValueError):
+    """The model answered, but the draft failed a deterministic quality gate."""
+
+
 class NewsEditor:
-    """One API call per unique candidate."""
+    """Prepare a draft; quality failures can be repaired with one explicit second call."""
 
     def __init__(
         self,
@@ -463,12 +467,11 @@ class NewsEditor:
                     raise
                 await asyncio.sleep(min(8, 1.5 * (2 ** attempt)))
 
-    async def edit(self, news):
+    def _prepare_material(self, news):
         raw_input = str(news.summary or news.title or "")
         raw_material = strip_source_mentions(raw_input, news.source)
         material = _trim_to_sentence_boundary(raw_material, self.max_material_chars)
         original_plain = _plain(material)
-        original_len = len(original_plain)
         if not material or not original_plain:
             raise ValueError("Candidate lost all factual text during source cleanup")
 
@@ -477,44 +480,12 @@ class NewsEditor:
             self.max_completion_tokens,
             max(500, min(1500, int(original_words * 2.2) + 180)),
         )
+        return material, len(original_plain), completion_budget
 
-        system = SYSTEM + """
-
-ДОДАТКОВИЙ КОНТРОЛЬ ЯКОСТІ:
-- Перед формуванням JSON прочитай весь матеріал і перевір зміст кожного абзацу.
-- Відбирай факти за змістом, а не за емодзі, жирним шрифтом, першою позицією,
-  довжиною рядка чи іншими візуальними ознаками.
-- Не залишай лише перший абзац, якщо далі є нові факти.
-- Якщо оригінал містить кілька змістовних абзаців, результат повинен передати
-  зміст усіх таких абзаців, навіть якщо їх доведеться об'єднати.
-- Кожне речення у відповіді має бути завершеним.
-- Для короткого/середнього поста не стискай текст механічно до 2–3 рядків.
-- Якщо title вже містить головний факт, у text залишай решту важливих деталей.
-- Поверни готовий результат з першої спроби.
-"""
-
-        response = await self._request([
-            {"role": "system", "content": system},
-            {
-                "role": "user",
-                "content": (
-                    "Внутрішні метадані для перевірки фактів. "
-                    "НЕ включай джерело, username або посилання в результат.\n"
-                    f"Заголовок матеріалу: {news.title}\n"
-                    f"Дата публікації: {news.published_at or 'невідомо'}\n"
-                    f"Оригінальний матеріал ({original_len} символів без HTML):\n{material}"
-                ),
-            },
-        ], max_completion_tokens=completion_budget)
-
-        data = json.loads(response.choices[0].message.content or "{}")
+    def _build_result(self, data, news, material, original_len):
         title = strip_source_mentions(data.get("title") or "", news.source)
         if not _is_usable_title(title):
-            title = _fallback_title_from_material(material)
-        if not _is_usable_title(title):
-            title = _fallback_title_from_material(news.title)
-        if not _is_usable_title(title):
-            raise ValueError("AI returned no usable factual title")
+            raise QualityError("no usable factual title")
 
         text = sanitize_news_html(data.get("text") or "", news.source)
         text = sanitize_news_html(_finish_at_sentence_boundary(text), news.source)
@@ -526,16 +497,14 @@ class NewsEditor:
                 paragraphs = paragraphs[1:]
             text = "\n\n".join(paragraphs).strip()
 
-        # One paid AI call only. Reject only genuine catastrophic truncation,
-        # not normal concise semantic rewriting.
         if _material_coverage_too_low(title, text, material):
-            raise ValueError("AI output catastrophically truncated the material")
+            raise QualityError("coverage too low: important factual content was lost")
 
         if _has_excessive_source_copy(title, text, material, news.title):
-            raise ValueError("AI output contains excessive verbatim copying from the source")
+            raise QualityError("excessive verbatim copying from the source")
 
         if _is_near_verbatim_copy(title, text, material):
-            raise ValueError("AI output is too close to the original wording")
+            raise QualityError("wording is too close to the original")
 
         plain_result = _plain(text)
         if original_len >= 120 and len(plain_result) > int(original_len * 1.35) + 80:
@@ -567,3 +536,66 @@ class NewsEditor:
             source_urls=[],
             event_key=event_key or title or news.title,
         )
+
+    def _base_system(self):
+        return SYSTEM + """
+
+ДОДАТКОВИЙ КОНТРОЛЬ ЯКОСТІ:
+- Перед формуванням JSON прочитай весь матеріал і перевір зміст кожного абзацу.
+- Не залишай лише перший абзац, якщо далі є нові факти.
+- Якщо оригінал містить кілька змістовних абзаців, результат повинен передати
+  зміст усіх таких абзаців, навіть якщо їх доведеться об'єднати.
+- Кожне речення у відповіді має бути завершеним.
+- Для короткого/середнього поста не стискай текст механічно до 2–3 рядків.
+- Якщо title вже містить головний факт, у text залишай решту важливих деталей.
+"""
+
+    async def edit(self, news):
+        material, original_len, completion_budget = self._prepare_material(news)
+        response = await self._request([
+            {"role": "system", "content": self._base_system() + "\nПоверни готовий результат з першої спроби."},
+            {
+                "role": "user",
+                "content": (
+                    "Внутрішні метадані для перевірки фактів. "
+                    "НЕ включай джерело, username або посилання в результат.\n"
+                    f"Заголовок матеріалу: {news.title}\n"
+                    f"Дата публікації: {news.published_at or 'невідомо'}\n"
+                    f"Оригінальний матеріал ({original_len} символів без HTML):\n{material}"
+                ),
+            },
+        ], max_completion_tokens=completion_budget)
+        data = json.loads(response.choices[0].message.content or "{}")
+        return self._build_result(data, news, material, original_len)
+
+    async def repair(self, news, reason):
+        """Make one fresh rewrite after a deterministic quality failure."""
+        material, original_len, completion_budget = self._prepare_material(news)
+        repair_system = self._base_system() + f"""
+
+ПОПЕРЕДНЯ СПРОБА НЕ ПРОЙШЛА ПЕРЕВІРКУ: {reason}
+
+ЗРОБИ НОВУ САМОСТІЙНУ ВЕРСІЮ З НУЛЯ ЗА ОРИГІНАЛЬНИМ МАТЕРІАЛОМ.
+Не виправляй старий текст механічно. Особливо важливо:
+- не копіюй речення або довгі фрагменти дослівно;
+- не повторюй структуру та порядок речень оригіналу механічно;
+- не губи змістовні абзаци й ключові факти;
+- title і text не повинні дублювати один одного;
+- не повертай обірвані речення;
+- не додавай жодних нових фактів.
+"""
+        response = await self._request([
+            {"role": "system", "content": repair_system},
+            {
+                "role": "user",
+                "content": (
+                    "Створи НОВИЙ виправлений результат тільки з цього матеріалу. "
+                    "НЕ включай джерело, username або посилання.\n"
+                    f"Заголовок матеріалу: {news.title}\n"
+                    f"Дата публікації: {news.published_at or 'невідомо'}\n"
+                    f"Оригінальний матеріал ({original_len} символів без HTML):\n{material}"
+                ),
+            },
+        ], max_completion_tokens=completion_budget)
+        data = json.loads(response.choices[0].message.content or "{}")
+        return self._build_result(data, news, material, original_len)
