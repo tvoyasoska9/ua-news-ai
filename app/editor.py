@@ -13,7 +13,7 @@ from app.models import EditedNews
 SYSTEM = """
 Ти — редактор українського новинного Telegram-каналу.
 
-Твоя задача: перекласти матеріал українською та унікально переформулювати його.
+Твоя задача: ПОВНІСТЮ передати зміст оригінального матеріалу українською мовою, лише злегка перефразувавши формулювання. Це НЕ переказ і НЕ скорочений виклад.
 
 МОВА — ЖОРСТКА ВИМОГА:
 - КОЖЕН матеріал без винятку має бути українською мовою, незалежно від мови джерела;
@@ -31,20 +31,23 @@ SYSTEM = """
 - заборонено брати перші 2–3 рядки та механічно обривати решту матеріалу;
 - заборонено завершувати text незакінченим реченням або фрагментом думки.
 
-ГОЛОВНЕ ПРАВИЛО ОБСЯГУ:
-Пиши стислий Telegram-пост, а не повний переклад статті.
+ГОЛОВНЕ ПРАВИЛО ОБСЯГУ — КРИТИЧНО ВАЖЛИВО:
+НЕ роби summary, стислий переказ або скорочену версію.
 
-- збережи всі ключові факти, необхідні для розуміння новини;
-- прибирай повтори, другорядні деталі та редакційний шум;
-- не додавай нові факти, пояснення або контекст;
-- коротке джерело -> короткий результат;
-- довгу статтю стискай до суті без втрати головних фактів;
-- зазвичай достатньо приблизно 80–180 слів;
-- не роздувай текст лише для того, щоб повторити обсяг оригіналу;
-- але НІКОЛИ не скорочуй короткий або середній Telegram-пост настільки, щоб
-  зникли окремі фактичні абзаци, ключові ризики, причини чи висновки автора;
-- якщо оригінал уже короткий/середній, збережи практично весь його фактичний
-  зміст і всі змістовні абзаци, а не лише перше речення.
+- результат повинен максимально зберігати обсяг і весь фактичний зміст оригінального поста;
+- ТВОЄ ЗАВДАННЯ: перекласти українською (якщо потрібно) + лише трохи перефразувати;
+- не викидай абзаци, речення або деталі лише тому, що вони здаються другорядними;
+- не вирішуй самостійно, яку частину матеріалу читачеві «достатньо» знати;
+- кожен змістовний факт оригіналу має залишитися в результаті;
+- зберігай усі змістовні абзаци та логіку матеріалу;
+- дозволено прибрати тільки явні повтори, рекламу, заклики підписатися, footer і назву джерела;
+- НЕ встановлюй штучну ціль на кшталт 80–180 слів;
+- короткий пост -> майже така сама довжина;
+- середній пост -> майже така сама довжина;
+- довгий пост можна лише трохи ущільнити, але без втрати фактів;
+- НІКОЛИ не обрізай матеріал після першого або другого абзацу.
+
+Перед відповіддю перевір: чи можна зіставити всі фактичні твердження оригіналу з результатом. Якщо факт зник — результат неправильний.
 
 ЗАГОЛОВОК І ОСНОВНИЙ ТЕКСТ — НЕ ПОВТОРЮЮТЬ ОДНЕ ОДНОГО:
 - title коротко повідомляє головний факт;
@@ -458,7 +461,9 @@ def _coverage_too_low(title, text, material):
     # Short Telegram posts are exactly where the old <70-word bypass allowed
     # broken one-line outputs through. Do not allow a factual post to become
     # only a headline.
-    minimum = max(18, int(original_words * 0.28))
+    # This editor is a translator/light paraphraser, not a summarizer. For normal
+    # Telegram posts the output must retain most of the original factual volume.
+    minimum = max(18, int(original_words * (0.70 if original_words <= 450 else 0.55)))
     if result_words < minimum:
         return True
 
@@ -563,7 +568,8 @@ class NewsEditor:
     ):
         self.client = AsyncOpenAI(api_key=api_key)
         self.model = model
-        self.max_material_chars = max(1500, min(int(max_material_chars), 6000))
+        # Never silently cut a normal Telegram source post. The previous 6000-character cap could remove the entire second half of a source before the model even saw it.
+        self.max_material_chars = max(20000, min(int(max_material_chars), 20000))
         self.max_completion_tokens = max(400, min(int(max_completion_tokens), 1600))
         self.max_retries = max(0, min(int(max_retries), 3))
 
@@ -585,7 +591,9 @@ class NewsEditor:
     def _prepare_material(self, news):
         raw_input = str(news.summary or news.title or "")
         raw_material = strip_source_mentions(raw_input, news.source)
-        material = _trim_to_sentence_boundary(raw_material, self.max_material_chars)
+        # Preserve the complete source whenever possible. Trimming is only a hard
+        # safety limit for exceptionally large payloads, never a summarization rule.
+        material = raw_material if len(raw_material) <= self.max_material_chars else _trim_to_sentence_boundary(raw_material, self.max_material_chars)
         original_plain = _plain(material)
         if not material or not original_plain:
             raise ValueError("Candidate lost all factual text during source cleanup")
@@ -634,7 +642,9 @@ class NewsEditor:
                     else:
                         raise QualityError("no usable Ukrainian factual title")
 
-        text = sanitize_news_html(_finish_at_sentence_boundary(text), news.source)
+        # Do not cut the model output at the last punctuation mark: that behavior
+        # can remove the entire ending of a post. Preserve the full generated text.
+        text = sanitize_news_html(text, news.source)
         title = strip_source_mentions(_strip_explicit_attribution(title), news.source)
         text = sanitize_news_html(_strip_explicit_attribution(text), news.source)
         if not _is_usable_title(title):
@@ -648,11 +658,12 @@ class NewsEditor:
         if _contains_russian_text(title) or _contains_russian_text(text) or _contains_russian_text(event_key):
             raise QualityError("result contains Russian-language text; Ukrainian translation is mandatory")
 
+        # Never delete a paragraph merely because it resembles the headline.
+        # The old code removed the first body paragraph here, which could silently
+        # destroy factual content. The prompt handles stylistic duplication; data
+        # preservation has priority over cosmetic de-duplication.
         if _title_repeated_in_body(title, text):
-            paragraphs = [part.strip() for part in re.split(r"\n\s*\n+", text) if part.strip()]
-            if paragraphs:
-                paragraphs = paragraphs[1:]
-            text = "\n\n".join(paragraphs).strip()
+            pass
 
         # A moderation card must contain an actual rewritten news item, not just
         # a copied headline. These thresholds are deliberately calibrated so a
@@ -668,7 +679,9 @@ class NewsEditor:
             raise QualityError("wording is too close to the original")
 
         plain_result = _plain(text)
-        if original_len >= 120 and len(plain_result) > int(original_len * 1.35) + 80:
+        # Do not truncate a valid complete rewrite simply because it is somewhat
+        # longer after Ukrainian translation. Only guard against pathological expansion.
+        if original_len >= 120 and len(plain_result) > int(original_len * 2.20) + 250:
             limit = int(original_len * 1.25) + 60
             plain_text = _plain(text)
             boundaries = [plain_text.rfind(mark, 0, limit + 1) for mark in ".!?…"]
@@ -710,7 +723,8 @@ class NewsEditor:
 - Якщо оригінал містить кілька змістовних абзаців, результат повинен передати
   зміст усіх таких абзаців, навіть якщо їх доведеться об'єднати.
 - Кожне речення у відповіді має бути завершеним.
-- Для короткого/середнього поста не стискай текст механічно до 2–3 рядків.
+- Для короткого/середнього поста зберігай майже весь обсяг і весь фактичний зміст; НЕ стискай його до 2–3 рядків.
+- Це режим ПОВНОГО ПЕРЕКЛАДУ З ЛЕГКИМ ПЕРЕФРАЗУВАННЯМ, а не режим summary.
 - Якщо title вже містить головний факт, у text залишай решту важливих деталей.
 """
 
