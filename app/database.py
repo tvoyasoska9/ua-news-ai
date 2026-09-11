@@ -139,6 +139,25 @@ class Database:
         )
         self.conn.commit()
 
+    def get_ai_stats(self, hours=24):
+        """Return exact AI attempt and outcome counters for a time window."""
+        since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+        rows = self.conn.execute(
+            "SELECT stage, COUNT(*) FROM source_metrics "
+            "WHERE created_at >= ? AND stage LIKE 'ai_%' GROUP BY stage",
+            (since,),
+        ).fetchall()
+        result = {
+            "ai_started": 0,
+            "ai_completed": 0,
+            "ai_repair": 0,
+            "ai_error": 0,
+        }
+        for stage, count in rows:
+            if stage in result:
+                result[stage] = count
+        return result
+
     def get_source_stats(self, hours=24):
         since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
         rows = self.conn.execute(
