@@ -190,7 +190,10 @@ class NewsPipeline:
                 # Transient/model-side quality failures must remain retryable.
                 # Do not silently turn a temporary bad generation into a
                 # permanently lost news item.
-                if status not in {"error_retry", "quality_rejected_final"}:
+                # Only genuine transient failures are retried. A candidate that
+                # already failed deterministic validation must not consume every
+                # later cycle and block newer news from reaching moderation.
+                if status != "error_retry":
                     log.info(
                         "Candidate skipped | reason=already_handled | status=%s | source=%s | title=%s",
                         status,
@@ -200,7 +203,7 @@ class NewsPipeline:
                     _cleanup_media(raw.media_path, raw.media_paths)
                     continue
                 log.info(
-                    "Retrying previously failed candidate | status=%s | source=%s | title=%s",
+                    "Retrying transiently failed candidate | status=%s | source=%s | title=%s",
                     status,
                     raw.source,
                     raw.title[:120],
