@@ -449,22 +449,12 @@ def _meaningful_paragraphs(value):
 
 
 def _coverage_too_low(title, text, material):
-    """Safety check against an empty/obviously broken model response only.
+    """Quality telemetry only.
 
-    The product requirement is full translation with light paraphrasing, so this
-    function must never act as an editorial summarizer and reject usable news
-    merely because the model used fewer words than the source.
+    Moderation is performed by a human. This pipeline must never stop offering
+    fresh news because an automated word/paragraph heuristic dislikes the
+    generated length. Only an actually empty response is handled elsewhere.
     """
-    original_words = _word_count(material)
-    body_words = _word_count(text)
-    total_words = _word_count(title) + body_words
-
-    if original_words < 25:
-        return False
-
-    # Reject only genuinely broken outputs: title-only or near-empty body.
-    if total_words < 8 or body_words < 4:
-        return True
     return False
 
 def _material_coverage_too_low(title, text, material):
@@ -630,7 +620,17 @@ class NewsEditor:
                     if _is_usable_title(original_title) and not _contains_russian_text(original_title):
                         title = original_title
                     else:
-                        raise QualityError("no usable Ukrainian factual title")
+                        # Availability-first fallback: if the model produced a
+                        # Ukrainian body but a weak title, derive a short title
+                        # from the first meaningful Ukrainian sentence instead
+                        # of dropping the entire news item.
+                        body_plain = _plain(text).strip()
+                        sentence = re.split(r"(?<=[.!?])\s+|\n+", body_plain, maxsplit=1)[0].strip()
+                        sentence = sentence[:140].rstrip(" ,:;—–-")
+                        if sentence and not _contains_russian_text(sentence):
+                            title = sentence
+                        else:
+                            raise QualityError("no usable Ukrainian factual title")
 
         # Do not cut the model output at the last punctuation mark: that behavior
         # can remove the entire ending of a post. Preserve the full generated text.
@@ -638,7 +638,12 @@ class NewsEditor:
         title = strip_source_mentions(_strip_explicit_attribution(title), news.source)
         text = sanitize_news_html(_strip_explicit_attribution(text), news.source)
         if not _is_usable_title(title):
-            raise QualityError("title became unusable after source attribution cleanup")
+            body_plain = _plain(text).strip()
+            sentence = re.split(r"(?<=[.!?])\s+|\n+", body_plain, maxsplit=1)[0].strip()[:140].rstrip(" ,:;—–-")
+            if sentence and not _contains_russian_text(sentence):
+                title = sentence
+            else:
+                raise QualityError("title became unusable after source attribution cleanup")
 
         event_key = strip_source_mentions(data.get("event_key") or title or news.title, news.source)
 
