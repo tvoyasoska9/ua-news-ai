@@ -134,6 +134,13 @@ class NewsPipeline:
         log.info("Collected %s Telegram candidates from configured channels", len(items))
 
         if self._prepared_news_limit_reached():
+            log.info(
+                "Daily prepared-news limit reached before processing | prepared_news: %s/%s | model_calls: %s/%s",
+                self.db.daily_count("prepared_news"),
+                self.settings.max_prepared_news_per_day,
+                self.db.daily_count("model_calls"),
+                self.settings.max_model_calls_per_day,
+            )
             return
 
         # Cheap duplicate screening happens before OpenAI. Keep titles seen in
