@@ -57,50 +57,7 @@ class Database:
             "count INTEGER NOT NULL DEFAULT 0,"
             "PRIMARY KEY (usage_date, usage_key))"
         )
-        self.conn.execute(
-            "CREATE TABLE IF NOT EXISTS daily_usage ("
-            "usage_date TEXT NOT NULL,"
-            "usage_key TEXT NOT NULL,"
-            "count INTEGER NOT NULL DEFAULT 0,"
-            "PRIMARY KEY (usage_date, usage_key))"
-        )
         self.conn.commit()
-
-    def daily_count(self, usage_key, now=None):
-        now = now or datetime.now(timezone.utc)
-        usage_date = now.astimezone(timezone.utc).date().isoformat()
-        row = self.conn.execute(
-            "SELECT count FROM daily_usage WHERE usage_date=? AND usage_key=?",
-            (usage_date, usage_key),
-        ).fetchone()
-        return int(row[0]) if row else 0
-
-    def try_consume_daily(self, usage_key, limit, now=None):
-        """Atomically consume one persistent daily quota slot."""
-        now = now or datetime.now(timezone.utc)
-        usage_date = now.astimezone(timezone.utc).date().isoformat()
-        limit = max(0, int(limit))
-        self.conn.execute("BEGIN IMMEDIATE")
-        try:
-            row = self.conn.execute(
-                "SELECT count FROM daily_usage WHERE usage_date=? AND usage_key=?",
-                (usage_date, usage_key),
-            ).fetchone()
-            current = int(row[0]) if row else 0
-            if current >= limit:
-                self.conn.rollback()
-                return False
-            new_count = current + 1
-            self.conn.execute(
-                "INSERT INTO daily_usage (usage_date,usage_key,count) VALUES (?,?,?) "
-                "ON CONFLICT(usage_date,usage_key) DO UPDATE SET count=excluded.count",
-                (usage_date, usage_key, new_count),
-            )
-            self.conn.commit()
-            return True
-        except Exception:
-            self.conn.rollback()
-            raise
 
     def daily_count(self, usage_key):
         usage_date = datetime.now(timezone.utc).date().isoformat()
@@ -111,7 +68,7 @@ class Database:
         return int(row[0]) if row else 0
 
     def try_consume_daily(self, usage_key, limit):
-        """Atomically consume one persistent daily quota slot."""
+        """Atomically reserve one persistent daily quota slot."""
         usage_date = datetime.now(timezone.utc).date().isoformat()
         limit = max(0, int(limit))
         self.conn.execute("BEGIN IMMEDIATE")
@@ -131,6 +88,26 @@ class Database:
             )
             self.conn.commit()
             return True
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def release_daily(self, usage_key):
+        """Return one reserved quota slot when the protected action failed."""
+        usage_date = datetime.now(timezone.utc).date().isoformat()
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.conn.execute(
+                "SELECT count FROM daily_usage WHERE usage_date=? AND usage_key=?",
+                (usage_date, usage_key),
+            ).fetchone()
+            current = int(row[0]) if row else 0
+            if current > 0:
+                self.conn.execute(
+                    "UPDATE daily_usage SET count=? WHERE usage_date=? AND usage_key=?",
+                    (current - 1, usage_date, usage_key),
+                )
+            self.conn.commit()
         except Exception:
             self.conn.rollback()
             raise
