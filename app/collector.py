@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import re
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from bs4 import BeautifulSoup
@@ -10,6 +11,7 @@ from app.sources import TELEGRAM_SOURCES
 
 log = logging.getLogger(__name__)
 TELEGRAM_POST_LIMIT = 100
+MAX_NEWS_AGE_MINUTES = 60
 _telegram_client = None
 _telegram_lock = asyncio.Lock()
 
@@ -87,6 +89,10 @@ def _title_from_blocks(blocks):
     return re.sub(r"\s+", " ", blocks[0]["text"]).strip()[:300] if blocks else ""
 
 async def fetch_telegram_source(client, source):
+    # Strict rolling window: only source posts published within the last
+    # 60 minutes from the actual moment of collection are eligible.
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(minutes=MAX_NEWS_AGE_MINUTES)
     username = source["username"]
     try:
         entity = await client.get_entity(username)
@@ -116,8 +122,15 @@ async def fetch_telegram_source(client, source):
 
         summary = "\n\n".join(block["text"] for block in blocks)
         first = group[0]
-        published_at = min((m.date for m in group if m.date), default=None)
-        published_at = published_at.isoformat() if published_at else None
+        published_dt = min((m.date for m in group if m.date), default=None)
+        if published_dt:
+            if published_dt.tzinfo is None:
+                published_dt = published_dt.replace(tzinfo=timezone.utc)
+            else:
+                published_dt = published_dt.astimezone(timezone.utc)
+            if published_dt < cutoff or published_dt > now:
+                continue
+        published_at = published_dt.isoformat() if published_dt else None
         media_messages = [
             m for m in group
             if m.photo or m.video or (m.document and str(getattr(m.document, "mime_type", "")).startswith("video/"))
