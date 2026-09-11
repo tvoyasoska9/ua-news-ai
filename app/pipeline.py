@@ -188,7 +188,9 @@ class NewsPipeline:
                         pass
                     continue
 
+                self.db.record_metric(raw.url, raw.source, "model_started")
                 edited = await self.editor.edit(raw)
+                self.db.record_metric(raw.url, raw.source, "model_completed")
             except Exception:
                 log.exception("AI editing failed")
                 self.db.set_status(raw.url, "error")
