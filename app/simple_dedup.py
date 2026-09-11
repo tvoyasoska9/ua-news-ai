@@ -34,16 +34,17 @@ def is_duplicate_text(text, recent_texts):
         if candidate_fp == fingerprint(old_norm):
             return True
 
-        # Same story copied through another source often differs only by punctuation,
-        # source wording or one short lead-in. Require both high text similarity and
-        # substantial factual-token overlap to avoid blocking genuinely new updates.
-        if min(len(candidate), len(old_norm)) >= 80:
+        if min(len(candidate), len(old_norm)) >= 60:
             ratio = fuzz.ratio(candidate, old_norm)
             token_ratio = fuzz.token_set_ratio(candidate, old_norm)
             old_tokens = set(_tokens(old_norm))
             union = candidate_tokens | old_tokens
             overlap = (len(candidate_tokens & old_tokens) / len(union)) if union else 0.0
-            if (ratio >= 90 and overlap >= 0.70) or (token_ratio >= 95 and overlap >= 0.78):
+            if (
+                (ratio >= 84 and overlap >= 0.58)
+                or (token_ratio >= 90 and overlap >= 0.68)
+                or (ratio >= 78 and overlap >= 0.82)
+            ):
                 return True
 
     return False
