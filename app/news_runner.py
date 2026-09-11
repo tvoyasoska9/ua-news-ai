@@ -23,10 +23,12 @@ class NewsRunner:
     async def _process_one(self, raw, recent):
         # Reserve the exact Telegram source post before any asynchronous work.
         if not self.db.claim(raw.url, raw.summary):
+            log.info("skip already claimed/processed: %s", raw.url)
             return
 
         try:
             if is_duplicate_text(raw.summary, recent):
+                log.info("skip duplicate: %s", raw.url)
                 self.db.mark(raw.url, raw.summary, "duplicate")
                 return
 
@@ -34,6 +36,7 @@ class NewsRunner:
             await materialize_news(raw)
             await self.bot.send_for_moderation(edited, raw)
             self.db.mark(raw.url, raw.summary, "proposed")
+            log.info("proposed for moderation: %s", raw.url)
             recent.append(raw.summary)
         except Exception:
             self.db.release(raw.url)
