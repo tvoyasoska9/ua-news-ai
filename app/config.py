@@ -97,7 +97,7 @@ def get_settings():
         history_retention_days=bounded_int("HISTORY_RETENTION_DAYS", 30, 7, 180),
         # Retries are only used for transient API failures.
         ai_max_retries=bounded_int("AI_MAX_RETRIES", 0, 0, 0),
-        max_model_calls_per_day=bounded_int("MAX_MODEL_CALLS_PER_DAY", 30, 1, 500),
+        max_model_calls_per_day=bounded_int("MAX_MODEL_CALLS_PER_DAY", 100, 25, 500),
         # This quota counts only news successfully published to the channel.
         # Moderation/rejections do not consume it.
         max_published_news_per_day=bounded_int("MAX_PUBLISHED_NEWS_PER_DAY", 25, 1, 100),
