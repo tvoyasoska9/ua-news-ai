@@ -178,11 +178,17 @@ class Database:
         self.conn.commit()
 
     def get_recent_titles(self, limit=1000):
+        # Retryable candidates must not poison title deduplication. Otherwise a
+        # failed candidate is loaded on restart and immediately matches its own
+        # historical title, so it can never reach the retry path.
+        retryable = ("error_retry", "quality_failed_retry", "quality_retry_pending", "processing")
+        placeholders = ",".join("?" for _ in retryable)
         rows = self.conn.execute(
-            "SELECT title FROM news "
-            "WHERE title IS NOT NULL AND title != '' "
-            "ORDER BY created_at DESC LIMIT ?",
-            (limit,),
+            f"SELECT title FROM news "
+            f"WHERE title IS NOT NULL AND title != '' "
+            f"AND status NOT IN ({placeholders}) "
+            f"ORDER BY created_at DESC LIMIT ?",
+            (*retryable, limit),
         ).fetchall()
         return [row[0] for row in reversed(rows)]
 
