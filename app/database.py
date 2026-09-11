@@ -113,17 +113,26 @@ class Database:
             raise
 
     def exists(self, url, fingerprint=None):
+        """Return True only when a candidate is terminally handled.
+
+        Transient/API failures and deterministic quality failures are retryable;
+        otherwise one bad model response would permanently erase a real news item.
+        """
+        retryable = {"error_retry", "quality_failed_retry", "quality_retry_pending", "processing"}
         if fingerprint:
-            row = self.conn.execute(
-                "SELECT 1 FROM news WHERE url=? OR fingerprint=? LIMIT 1",
+            rows = self.conn.execute(
+                "SELECT url,status FROM news WHERE url=? OR fingerprint=?",
                 (url, fingerprint),
-            ).fetchone()
+            ).fetchall()
         else:
-            row = self.conn.execute(
-                "SELECT 1 FROM news WHERE url=? LIMIT 1",
+            rows = self.conn.execute(
+                "SELECT url,status FROM news WHERE url=?",
                 (url,),
-            ).fetchone()
-        return row is not None
+            ).fetchall()
+
+        if not rows:
+            return False
+        return any((status or "") not in retryable for _, status in rows)
 
     def add(self, url, fingerprint, title, source, status):
         now = datetime.now(timezone.utc).isoformat()
