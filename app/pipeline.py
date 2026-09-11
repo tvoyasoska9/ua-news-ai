@@ -143,6 +143,23 @@ class NewsPipeline:
             return
         remaining_target = self.settings.max_published_news_per_day - published_today
 
+        # Do not generate an unlimited moderation backlog. Pending cards already
+        # represent candidates waiting for a human decision, and in-memory queue
+        # items are about to become cards. Once they can fill the remaining daily
+        # publication target, stop before collection/media/AI work entirely.
+        pending_fresh = self.db.pending_count(max_age_minutes=MAX_QUEUE_AGE_MINUTES)
+        preparation_capacity = max(0, remaining_target - pending_fresh - len(self.queue))
+        if preparation_capacity <= 0:
+            log.info(
+                "Preparation paused | published=%s/%s pending=%s queue=%s remaining_target=%s",
+                published_today,
+                self.settings.max_published_news_per_day,
+                pending_fresh,
+                len(self.queue),
+                remaining_target,
+            )
+            return
+
         items = await collect_news(self.settings)
 
         # collect_news() is Telegram-only. Preserve the collector's strict
@@ -190,12 +207,15 @@ class NewsPipeline:
             # balance in a single minute. The publication target is enforced
             # only on successful publication, so moderation cards themselves do
             # not reduce the number of candidates that may be prepared.
-            if ai_attempts >= self.settings.max_ai_candidates_per_cycle:
+            cycle_cap = min(self.settings.max_ai_candidates_per_cycle, preparation_capacity)
+            if ai_attempts >= cycle_cap:
                 log.info(
-                    "AI cycle safety cap reached (%s candidates this cycle; published=%s/%s)",
-                    self.settings.max_ai_candidates_per_cycle,
+                    "AI cycle capacity reached (%s candidate(s); published=%s/%s pending=%s queue=%s)",
+                    cycle_cap,
                     published_today,
                     self.settings.max_published_news_per_day,
+                    pending_fresh,
+                    len(self.queue),
                 )
                 break
 
@@ -234,37 +254,27 @@ class NewsPipeline:
                 try:
                     edited = await self.editor.edit(raw)
                     self.db.record_metric(raw.url, raw.source, "model_completed")
-                except QualityError as first_quality_error:
-                    # A deterministic quality gate rejected the draft. This is
-                    # not a reason to permanently lose the news item: spend at
-                    # most one additional quota slot on a fresh rewrite with the
-                    # exact failure reason.
-                    reason = str(first_quality_error)
+                except QualityError as quality_error:
+                    # One candidate gets one model generation only. Deterministic
+                    # quality failures are rejected instead of spending a second
+                    # model call on automatic repair.
+                    reason = str(quality_error)
+                    self.db.set_status(raw.url, "quality_rejected")
                     self.db.record_metric(raw.url, raw.source, "ai_quality_failed")
-                    log.warning("Draft failed quality gate; attempting one repair | %s | %s", raw.title[:100], reason)
-
-                    if not self._consume_model_slot():
-                        self.db.set_status(raw.url, "quality_retry_pending")
-                        self.db.record_metric(raw.url, raw.source, "ai_repair_deferred")
-                        log.warning("No model slot available for quality repair; candidate will remain retryable")
-                        _cleanup_media(raw.media_path, raw.media_paths)
-                        continue
-
-                    self.db.record_metric(raw.url, raw.source, "ai_repair")
-                    try:
-                        edited = await self.editor.repair(raw, reason)
-                        self.db.record_metric(raw.url, raw.source, "model_completed")
-                        log.info("Quality repair succeeded: %s", raw.title[:100])
-                    except QualityError as repair_error:
-                        self.db.set_status(raw.url, "quality_failed_retry")
-                        self.db.record_metric(raw.url, raw.source, "ai_error")
-                        log.warning("Quality repair also failed; candidate remains retryable | %s | %s", raw.title[:100], repair_error)
-                        _cleanup_media(raw.media_path, raw.media_paths)
-                        continue
+                    log.warning(
+                        "Draft rejected by quality gate without repair | source=%s | title=%s | reason=%s",
+                        raw.source,
+                        raw.title[:100],
+                        reason,
+                    )
+                    _cleanup_media(raw.media_path, raw.media_paths)
+                    continue
             except Exception:
                 log.exception("AI editing failed")
-                # Runtime/API failures must not poison the URL forever. The
-                # database treats this status as retryable on a later cycle.
+                # The model did not produce a usable response, so return the
+                # reserved quota slot. A transient transport failure must not
+                # silently consume the daily AI budget.
+                self.db.release_daily("model_calls")
                 self.db.set_status(raw.url, "error_retry")
                 self.db.record_metric(raw.url, raw.source, "ai_error")
                 _cleanup_media(raw.media_path, raw.media_paths)
