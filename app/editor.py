@@ -672,11 +672,10 @@ class NewsEditor:
         if _coverage_too_low(title, text, material):
             raise QualityError("draft lost too much factual coverage")
 
-        if _title_is_effectively_copied(title, news.title, material):
-            raise QualityError("headline wording is effectively copied from the original")
-
-        if _is_near_verbatim_copy(title, text, material):
-            raise QualityError("wording is too close to the original")
+        # The user explicitly wants a full translation with only LIGHT paraphrasing.
+        # Do not reject a factually correct draft merely because some headline or
+        # wording remains close to the original; similarity is expected for names,
+        # numbers, short factual posts and already-Ukrainian source material.
 
         plain_result = _plain(text)
         # Do not truncate a valid complete rewrite simply because it is somewhat
@@ -715,9 +714,9 @@ class NewsEditor:
         return SYSTEM + """
 
 ДОДАТКОВИЙ КОНТРОЛЬ ЯКОСТІ:
-- ПЕРЕПИСУВАННЯ ОБОВ'ЯЗКОВЕ ДЛЯ КОЖНОГО ПОСТА, навіть якщо оригінал уже українською.
-- Не повертай жодне речення з оригіналу дослівно. Спочатку виділи факти, потім напиши новий текст іншою синтаксичною конструкцією.
-- Якщо результат можна накласти на оригінал майже слово в слово, він неправильний і його потрібно написати заново.
+- Якщо оригінал уже українською, роби лише легке редакторське перефразування без скорочення змісту.
+- Дозволене ЛЕГКЕ перефразування. Не переписуй матеріал радикально і не роби summary.
+- Зберігай природні формулювання, імена, цифри та факти; змінюй лише те, що потрібно для чистої української новинної подачі.
 - Перед формуванням JSON прочитай весь матеріал і перевір зміст кожного абзацу.
 - Не залишай лише перший абзац, якщо далі є нові факти.
 - Якщо оригінал містить кілька змістовних абзаців, результат повинен передати
@@ -755,8 +754,8 @@ class NewsEditor:
 
 ЗРОБИ НОВУ САМОСТІЙНУ ВЕРСІЮ З НУЛЯ ЗА ОРИГІНАЛЬНИМ МАТЕРІАЛОМ.
 Не виправляй старий текст механічно. Особливо важливо:
-- не копіюй речення або довгі фрагменти дослівно;
-- не повторюй структуру та порядок речень оригіналу механічно;
+- зроби повний текст природним українським новинним стилем, але не скорочуй його;
+- легке зближення формулювань з оригіналом допустиме, якщо факти передані точно;
 - не губи змістовні абзаци й ключові факти;
 - title і text не повинні дублювати один одного;
 - не повертай обірвані речення;
