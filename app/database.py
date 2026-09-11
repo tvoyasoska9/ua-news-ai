@@ -251,8 +251,18 @@ class Database:
         )
         self.conn.commit()
 
-    def pending_count(self):
-        row = self.conn.execute("SELECT COUNT(*) FROM pending_news").fetchone()
+    def pending_count(self, max_age_minutes=None):
+        """Count moderation cards, optionally only those still fresh enough to affect capacity."""
+        if max_age_minutes is None:
+            row = self.conn.execute("SELECT COUNT(*) FROM pending_news").fetchone()
+        else:
+            since = (
+                datetime.now(timezone.utc) - timedelta(minutes=max(0, int(max_age_minutes)))
+            ).isoformat()
+            row = self.conn.execute(
+                "SELECT COUNT(*) FROM pending_news WHERE created_at >= ?",
+                (since,),
+            ).fetchone()
         return int(row[0]) if row else 0
 
     def get_pending(self, item_id):
