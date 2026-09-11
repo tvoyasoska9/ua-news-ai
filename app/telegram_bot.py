@@ -147,6 +147,13 @@ class NewsBot:
             f"📂 Категорія: {escape(item.category)}",
             f"🔍 Впевненість: {escape(item.confidence)}",
         ]
+
+        # Original link is visible only in the moderation card for the admin.
+        # It is intentionally excluded from the final public publication.
+        safe_url = self._safe_original_url(original_url)
+        if safe_url:
+            lines += ["", f'🔗 <a href="{escape(safe_url, quote=True)}">Оригінальний пост</a>']
+
         return "\n".join(lines)
 
     def publish_text(self, item):
