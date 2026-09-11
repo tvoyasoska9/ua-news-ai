@@ -1,6 +1,5 @@
-# Telegram is the ONLY news intake for this project.
+# Telegram is the only news intake for this project.
 # No RSS feeds, websites, or web-source fallback is configured or used.
-# All configured channels are monitored with equal editorial priority.
 
 TELEGRAM_SOURCES = [
     {"name": "Ukrinformator", "username": "ukrinformator", "priority": 100},
