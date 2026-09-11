@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 from collections import deque
 from datetime import datetime, timedelta, timezone
 
@@ -13,6 +14,7 @@ log = logging.getLogger(__name__)
 # breaking/current news. They are not sent just because the queue was slow.
 MAX_QUEUE_AGE_MINUTES = 75
 MAX_QUEUE_SIZE = 24
+CYCLE_TIMEOUT_SECONDS = 120
 
 
 def _published_timestamp(value):
@@ -82,6 +84,9 @@ class NewsPipeline:
         self.queue_keys = set()
         self.queue_events = []
         self._last_cleanup = datetime.min.replace(tzinfo=timezone.utc)
+        # Updated by every healthy pipeline cycle. The main process uses this
+        # heartbeat to detect a silently stalled pipeline task.
+        self.last_activity = time.monotonic()
 
     def _consume_model_slot(self):
         return self.db.try_consume_daily("model_calls", self.settings.max_model_calls_per_day)
@@ -364,17 +369,30 @@ class NewsPipeline:
                 await asyncio.sleep(5)
 
     async def run_forever(self):
-        worker = asyncio.create_task(self.moderation_worker())
+        worker = asyncio.create_task(self.moderation_worker(), name="moderation-worker")
         try:
             while True:
+                self.last_activity = time.monotonic()
+                log.info("Pipeline cycle started")
                 try:
-                    await self.run_once()
+                    await asyncio.wait_for(
+                        self.run_once(),
+                        timeout=CYCLE_TIMEOUT_SECONDS,
+                    )
                 except asyncio.CancelledError:
                     raise
+                except TimeoutError:
+                    log.exception(
+                        "Pipeline cycle timed out after %s seconds; continuing with the next cycle",
+                        CYCLE_TIMEOUT_SECONDS,
+                    )
                 except Exception:
                     log.exception("Pipeline iteration failed")
 
-                await asyncio.sleep(self.settings.check_interval_minutes * 60)
+                self.last_activity = time.monotonic()
+                interval_seconds = self.settings.check_interval_minutes * 60
+                log.info("Pipeline cycle finished; next check in %s seconds", interval_seconds)
+                await asyncio.sleep(interval_seconds)
         finally:
             worker.cancel()
             await asyncio.gather(worker, return_exceptions=True)
