@@ -36,17 +36,10 @@ def _is_too_old(value):
         return False
 
 
-def _source_tier(item):
-    # Configured Telegram channels are PRIMARY. Web/RSS remains SECONDARY.
-    return 0 if item.source.startswith("Telegram:") else 1
-
-
 def _queue_sort_key(item):
-    # First source tier, then freshness. Telegram posts are primary; inside
-    # each tier the newest item is always sent first.
+    # Telegram-only pipeline: newest fresh post is always first.
     edited, url, image_url, published_at, source, media_type, media_path, media_paths, media_types = item
-    tier = 0 if str(source).startswith("Telegram:") else 1
-    return (tier, -_published_timestamp(published_at))
+    return (-_published_timestamp(published_at),)
 
 
 def _event_signature(edited):
@@ -130,18 +123,9 @@ class NewsPipeline:
 
         items = await collect_news(self.settings)
 
-        telegram_count = sum(1 for item in items if _source_tier(item) == 0)
-        rss_count = len(items) - telegram_count
-        log.info(
-            "Collected %s candidates: %s Telegram PRIMARY, %s web/RSS SECONDARY",
-            len(items), telegram_count, rss_count,
-        )
-
-        # Preserve collector's strict round-robin order for Telegram channels.
-        telegram_items = [item for item in items if _source_tier(item) == 0]
-        secondary_items = [item for item in items if _source_tier(item) == 1]
-        secondary_items.sort(key=lambda item: item.priority, reverse=True)
-        items = telegram_items + secondary_items
+        # collect_news() is Telegram-only. Preserve the collector's strict
+        # round-robin order across configured channels.
+        log.info("Collected %s Telegram candidates from configured channels", len(items))
 
         # Cheap duplicate screening happens before OpenAI. Keep titles seen in
         # this very cycle as well, otherwise five channels can spend five AI
@@ -185,9 +169,8 @@ class NewsPipeline:
             self.db.record_metric(raw.url, raw.source, "found")
 
             try:
-                # All cheap screening is complete. Only the selected candidate
-                # may now download expensive source data (Telegram media or a
-                # full RSS article and image).
+                # All cheap screening is complete. Only the selected Telegram
+                # candidate may now download its original media.
                 await materialize_news(raw)
 
                 # Some RSS feeds omit publication dates. If the article page
