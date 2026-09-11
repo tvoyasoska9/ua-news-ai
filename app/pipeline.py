@@ -83,6 +83,12 @@ class NewsPipeline:
         self.queue_events = []
         self._last_cleanup = datetime.min.replace(tzinfo=timezone.utc)
 
+    def _prepared_news_limit_reached(self):
+        return self.db.daily_count("prepared_news") >= self.settings.max_prepared_news_per_day
+
+    def _consume_model_slot(self):
+        return self.db.try_consume_daily("model_calls", self.settings.max_model_calls_per_day)
+
     def _resort_and_trim_queue(self):
         ordered = sorted(self.queue, key=_queue_sort_key)
 
