@@ -330,7 +330,7 @@ def _has_excessive_source_copy(title, text, material, source_title=""):
     title_norm = norm(title)
     if source_headline and len(_normalized_tokens(title)) >= 5:
         headline_norm = norm(source_headline)
-        if fuzz.ratio(title_norm, headline_norm) >= 88:
+        if fuzz.ratio(title_norm, headline_norm) >= 97:
             return True
 
     source_norm = norm(source)
@@ -343,19 +343,19 @@ def _has_excessive_source_copy(title, text, material, source_title=""):
     if len(source_tokens) >= 8 and len(result_tokens) >= 8:
         ratio = fuzz.ratio(source_norm, result_norm)
         token_sort = fuzz.token_sort_ratio(source_norm, result_norm)
-        if ratio >= 84 and token_sort >= 90:
+        if ratio >= 94 and token_sort >= 96:
             return True
 
-    # Reject copied fragments of six or more consecutive words. Proper names
-    # and short factual phrases may coincide, but a six-word sequence is enough
-    # to indicate mechanical copying in a Telegram rewrite.
-    if len(source_tokens) >= 6 and len(result_tokens) >= 6:
+    # Short factual phrases and names naturally coincide in Ukrainian news.
+    # Only reject long copied runs; six words was so aggressive that legitimate
+    # rewrites were repeatedly rejected and the pipeline stopped producing news.
+    if len(source_tokens) >= 10 and len(result_tokens) >= 10:
         source_ngrams = {
-            tuple(source_tokens[i:i + 6])
-            for i in range(len(source_tokens) - 5)
+            tuple(source_tokens[i:i + 10])
+            for i in range(len(source_tokens) - 9)
         }
-        for i in range(len(result_tokens) - 5):
-            if tuple(result_tokens[i:i + 6]) in source_ngrams:
+        for i in range(len(result_tokens) - 9):
+            if tuple(result_tokens[i:i + 10]) in source_ngrams:
                 return True
 
     return False
@@ -418,9 +418,9 @@ def _is_near_verbatim_copy(title, text, material):
 
     # No length bypass: short source posts must also be genuinely rewritten.
     return (
-        ratio >= 82
-        or (ratio >= 76 and token_sort >= 88)
-        or (token_ratio >= 97 and token_sort >= 86)
+        ratio >= 95
+        or (ratio >= 91 and token_sort >= 97)
+        or (token_ratio >= 99 and token_sort >= 96)
     )
 
 
