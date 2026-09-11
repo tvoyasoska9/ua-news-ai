@@ -197,6 +197,10 @@ class NewsPipeline:
                         pass
                     continue
 
+                if not self._consume_model_slot():
+                    self.db.set_status(raw.url, "daily_model_limit")
+                    log.warning("Daily model-call limit reached (%s)", self.settings.max_model_calls_per_day)
+                    break
                 self.db.record_metric(raw.url, raw.source, "model_started")
                 edited = await self.editor.edit(raw)
                 self.db.record_metric(raw.url, raw.source, "model_completed")
