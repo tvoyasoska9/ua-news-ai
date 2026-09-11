@@ -55,8 +55,10 @@ SYSTEM = """
 Якщо в оригінальному повідомленні є виділення, зберігай його логіку:
 важливі виділені фрагменти повинні залишатися виділеними, а звичайний текст —
 звичайним. Не роби весь текст жирним лише тому, що частина була виділена.
-Зберігай абзаци та загальну структуру оригіналу настільки точно, наскільки це
-можливо після перекладу й перефразування.
+НЕ копіюй речення, їх порядок або синтаксис механічно. Побудуй результат як
+самостійно написану новину: факти залишаються ті самі, але формулювання та
+побудова речень мають бути власними. Зберігай виділення лише там, де це справді
+допомагає читабельності; не відтворюй структуру оригіналу автоматично.
 
 ДЖЕРЕЛА ТА ПРОМО БЛОКИ — АБСОЛЮТНЕ ТАБУ В ГОТОВІЙ НОВИНІ:
 У title і text категорично заборонено згадувати назву каналу/сайту, @username,
@@ -308,7 +310,10 @@ def _coverage_too_low(title, text, material):
     # a tiny headline-sized summary. The threshold is intentionally much higher
     # than the old 55% guard because that still allowed whole factual sections
     # to disappear.
-    if result_words < int(original_words * 0.70):
+    # Completeness is about factual coverage, not reproducing most of the
+    # original wording. A 70% word-count requirement was effectively pushing
+    # the pipeline toward near-verbatim copies of Telegram posts.
+    if result_words < int(original_words * 0.45):
         return True
 
     # If a source contains several substantive paragraphs but the result has
@@ -348,6 +353,17 @@ def _fallback_full_material(material):
 
 def _material_coverage_too_low(title, text, material):
     return _coverage_too_low(title, text, material)
+
+
+def _is_near_verbatim_copy(title, text, material):
+    """Reject long outputs that reproduce the source almost word-for-word."""
+    source = re.sub(r"\s+", " ", _plain(material)).strip().lower()
+    result = re.sub(r"\s+", " ", _plain(f"{title}\n{text}")).strip().lower()
+    if _word_count(source) < 70 or _word_count(result) < 50:
+        return False
+    ratio = fuzz.ratio(source, result)
+    token_ratio = fuzz.token_set_ratio(source, result)
+    return ratio >= 88 and token_ratio >= 96
 
 
 def _title_repeated_in_body(title, body):
@@ -511,7 +527,10 @@ class NewsEditor:
         # If the draft is suspiciously short, make one targeted repair call.
         # The repair is asked to analyze the original content again and restore
         # omitted facts; it is not a blind retry of the same prompt.
-        if len(original_plain) <= 3200 and _material_coverage_too_low(title, text, material):
+        if len(original_plain) <= 3200 and (
+            _material_coverage_too_low(title, text, material)
+            or _is_near_verbatim_copy(title, text, material)
+        ):
             repair_system = SYSTEM + """
 РЕЖИМ ВІДНОВЛЕННЯ ПОВНОТИ:
 Нижче є ОРИГІНАЛ і ЧЕРНЕТКА, яка могла втратити частину змісту.
@@ -551,15 +570,11 @@ class NewsEditor:
                 # A malformed repair response must never break moderation.
                 pass
 
-        # Final lossless guard: if the model still discarded a substantial part
-        # of a short/medium source, publish the cleaned factual material rather
-        # than an attractive but mutilated summary.
-        if len(original_plain) <= 3200 and _material_coverage_too_low(title, text, material):
-            fallback_title, fallback_body = _fallback_full_material(material)
-            if _is_usable_title(fallback_title):
-                title = fallback_title
-            text = fallback_body
-            event_key = strip_source_mentions(event_key or title, news.source)
+        # Never replace an imperfect AI draft with the original source text.
+        # The previous "lossless fallback" could publish a Telegram post almost
+        # verbatim, which defeats the entire editorial stage.
+        if _is_near_verbatim_copy(title, text, material):
+            raise ValueError("AI output is too close to the original wording")
 
         # Last-resort local guard. We do not ask the API to rewrite again.
         # If a model response is wildly longer than the source, keeping the
