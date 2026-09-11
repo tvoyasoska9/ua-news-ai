@@ -144,34 +144,76 @@ def _contains_russian_text(value):
     return bool(tokens & RUSSIAN_MARKERS)
 
 
-# Known editorial/source attribution names must never leak into the rewritten news.
-# This removes only explicit attribution patterns, not factual names inside a sentence.
-_ATTRIBUTION_NAME_RE = re.compile(
-    r"(?iu)\\s*(?:,|—|–|-)\\s*(?:hromadske|ukrinform|уніан|уніан|interfax|reuters|ap|associated press|bbc|суспільне|радіо свобода)\\.?\\s*$"
+# Global source/attribution firewall. Source names are never allowed in the
+# public title/body, even when the model copied them from a source headline.
+_KNOWN_OUTLET_RE = re.compile(
+    r"(?iu)^(?:"
+    r"hromadske|ukrinform|уніан|interfax|reuters|associated press|ap|bbc|"
+    r"суспільне|радіо свобода|рбк[- ]?україна|рбк украина|"
+    r"liga\.net|nv|новое время|tsn|тсн|24 канал|"
+    r"українська правда|економічна правда|the kyiv independent"
+    r")\.?$"
+)
+_TRAILING_ATTRIBUTION_RE = re.compile(
+    r"(?iu)\s*(?:,|—|–|-)\s*"
+    r"(?:hromadske|ukrinform|уніан|interfax|reuters|associated press|ap|bbc|"
+    r"суспільне|радіо свобода|рбк[- ]?україна|рбк украина|liga\.net|nv|"
+    r"новое время|tsn|тсн|24 канал|українська правда|економічна правда|"
+    r"the kyiv independent)\.?\s*$"
 )
 _ATTRIBUTION_PHRASE_RE = re.compile(
-    r"(?iu)\\b(?:за даними|повідомляє|повідомив|зазначає)\\s+(?:hromadske|ukrinform|уніан|interfax|reuters|ap|bbc|суспільне|радіо свобода)\\b"
+    r"(?iu)\b(?:за даними|повідомляє|повідомив|зазначає|пише)\s+"
+    r"(?:hromadske|ukrinform|уніан|interfax|reuters|associated press|ap|bbc|"
+    r"суспільне|радіо свобода|рбк[- ]?україна|liga\.net|nv|"
+    r"українська правда|економічна правда)\b"
 )
-
 
 def _strip_explicit_attribution(value):
     text = str(value or "").strip()
+    if not text:
+        return ""
+
     text = _ATTRIBUTION_PHRASE_RE.sub("", text)
-    text = _ATTRIBUTION_NAME_RE.sub("", text)
-    text = re.sub(r"\\s+([,.;:!?])", r"\\1", text)
-    return text.strip(" \\n—–-,:;")
+    text = _TRAILING_ATTRIBUTION_RE.sub("", text)
 
+    # Remove generic terminal "— outlet" fragments when the terminal fragment
+    # is clearly an editorial brand, while preserving ordinary factual clauses.
+    parts = re.split(r"\s*(?:—|–)\s*", text)
+    if len(parts) >= 2:
+        tail = parts[-1].strip(" .")
+        if _KNOWN_OUTLET_RE.fullmatch(tail):
+            text = " — ".join(parts[:-1])
 
-def _title_is_effectively_copied(title, source_title):
-    a = re.sub(r"[^\\wіїєґ'’-]+", " ", _plain(title).lower()).strip()
-    b = re.sub(r"[^\\wіїєґ'’-]+", " ", _plain(source_title).lower()).strip()
-    a = re.sub(r"\\s+", " ", a)
-    b = re.sub(r"\\s+", " ", b)
-    if not a or not b or min(len(a), len(b)) < 18:
+    text = re.sub(r"\s+([,.;:!?])", r"\1", text)
+    return text.strip(" \n—–-,:;")
+
+def _normalized_for_copy(value):
+    text = _plain(_strip_explicit_attribution(value)).lower()
+    text = re.sub(r"[^\wіїєґ'’-]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+def _title_is_effectively_copied(title, source_title, material=""):
+    a = _normalized_for_copy(title)
+    b = _normalized_for_copy(source_title)
+    if not a:
         return False
-    # Exact copy is always forbidden. Very high similarity on a sufficiently
-    # long headline is also treated as a copied formulation.
-    return a == b or (len(a) >= 35 and fuzz.ratio(a, b) >= 97)
+
+    # Direct title-to-title copy.
+    if b and min(len(a), len(b)) >= 18:
+        if a == b or (len(a) >= 28 and fuzz.ratio(a, b) >= 93):
+            return True
+
+    # A model can copy the first sentence/headline from the material even when
+    # the transport title is empty or only an emoji.
+    source = _normalized_for_copy(material)
+    if len(a) >= 28 and source:
+        if a in source:
+            return True
+        first_sentence = re.split(r"(?<=[.!?…])\s+", _plain(material), maxsplit=1)[0]
+        first = _normalized_for_copy(first_sentence)
+        if len(first) >= 18 and fuzz.ratio(a, first) >= 93:
+            return True
+    return False
 
 
 def _source_aliases(source):
@@ -593,8 +635,8 @@ class NewsEditor:
                         raise QualityError("no usable Ukrainian factual title")
 
         text = sanitize_news_html(_finish_at_sentence_boundary(text), news.source)
-        title = _strip_explicit_attribution(title)
-        text = _strip_explicit_attribution(text)
+        title = strip_source_mentions(_strip_explicit_attribution(title), news.source)
+        text = sanitize_news_html(_strip_explicit_attribution(text), news.source)
         if not _is_usable_title(title):
             raise QualityError("title became unusable after source attribution cleanup")
 
@@ -619,7 +661,7 @@ class NewsEditor:
         if _coverage_too_low(title, text, material):
             raise QualityError("draft lost too much factual coverage")
 
-        if _title_is_effectively_copied(title, news.title):
+        if _title_is_effectively_copied(title, news.title, material):
             raise QualityError("headline wording is effectively copied from the original")
 
         if _is_near_verbatim_copy(title, text, material):
