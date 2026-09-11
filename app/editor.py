@@ -504,7 +504,20 @@ class NewsEditor:
                 if len(candidates) > 1:
                     text = sanitize_news_html(candidates[1].strip(), news.source)
             else:
-                raise QualityError("no usable factual title")
+                source_plain = _plain(material)
+                source_parts = re.split(r"(?<=[.!?…])\\s+", source_plain, maxsplit=1)
+                fallback = source_parts[0].strip() if source_parts else ""
+                if len(fallback) > 120:
+                    cut = max(fallback.rfind(" ", 0, 120), fallback.rfind(",", 0, 120))
+                    fallback = fallback[:cut if cut >= 40 else 120].rstrip(" ,:;—–-")
+                if _is_usable_title(fallback):
+                    title = fallback
+                else:
+                    original_title = strip_source_mentions(str(news.title or ""), news.source)
+                    if _is_usable_title(original_title):
+                        title = original_title
+                    else:
+                        raise QualityError("no usable factual title")
 
         text = sanitize_news_html(_finish_at_sentence_boundary(text), news.source)
         event_key = strip_source_mentions(data.get("event_key") or title or news.title, news.source)
