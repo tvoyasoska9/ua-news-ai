@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import signal
+import time
 
 from app.config import get_settings
 from app.database import Database
@@ -63,11 +64,11 @@ async def main():
 
             # If an external call leaves the pipeline awaiting forever, cancel
             # and recreate it instead of silently producing no news for hours.
-            if loop.time() - pipeline.last_activity > 180:
+            if time.monotonic() - pipeline.last_activity > 180:
                 log.error("News pipeline watchdog timeout; restarting stalled pipeline")
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
-                pipeline.last_activity = loop.time()
+                pipeline.last_activity = time.monotonic()
                 task = asyncio.create_task(
                     pipeline.run_forever(),
                     name="news-pipeline-watchdog-restart",
