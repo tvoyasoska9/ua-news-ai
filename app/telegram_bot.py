@@ -150,13 +150,7 @@ class NewsBot:
             f"📊 Важливість: <b>{item.importance}/10</b>",
             f"📂 Категорія: {escape(item.category)}",
             f"🔍 Впевненість: {escape(item.confidence)}",
-            "",
-            "🔐 <b>АДМІН-ІНФОРМАЦІЯ</b>",
-            f"📡 Джерело: <b>{escape(source or 'Невідомо')}</b>",
         ]
-        safe_url = self._safe_original_url(original_url)
-        if safe_url:
-            lines.append(f'🔗 <a href="{escape(safe_url, quote=True)}">Відкрити оригінальну публікацію</a>')
         return "\n".join(lines)
 
     def publish_text(self, item):
