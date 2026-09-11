@@ -124,12 +124,14 @@ class NewsPipeline:
             self.db.cleanup_history(self.settings.history_retention_days)
             self._last_cleanup = now
 
-        # Do not keep spending AI calls after enough news already exist to
-        # fill today's publication target. Capacity is based on successfully
-        # published news plus cards already waiting for moderation plus the
-        # in-memory queue that has already passed AI.
+        # Do not keep spending AI calls after enough *fresh* news already
+        # exist to fill today's publication target. Historical moderation cards
+        # must never freeze the pipeline: only cards created within the same
+        # freshness window as the live queue affect current capacity.
         published_today = self.db.daily_count("published_news")
-        pending_moderation = self.db.pending_count()
+        pending_moderation = self.db.pending_count(
+            max_age_minutes=MAX_QUEUE_AGE_MINUTES
+        )
         queued_ready = len(self.queue)
         remaining_target = (
             self.settings.max_published_news_per_day
