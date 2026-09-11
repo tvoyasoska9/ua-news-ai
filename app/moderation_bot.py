@@ -11,6 +11,8 @@ from telegram.ext import Application, CallbackQueryHandler
 log = logging.getLogger(__name__)
 KYIV = ZoneInfo("Europe/Kyiv")
 CAPTION_LIMIT = 1024
+CHANNEL_NAME = "УКРАЇНА 🇺🇦 LIVE 24"
+CHANNEL_HANDLE = "ukr24live"
 
 class ModerationBot:
     def __init__(self, settings, db):
@@ -37,10 +39,13 @@ class ModerationBot:
             InlineKeyboardButton("REJECT", callback_data="reject:" + item_id)
         ]])
 
-    def render(self, title, text):
+    def render(self, title, text, include_signature=False):
         title = escape(str(title or ""), quote=False)
         body = str(text or "").strip()
-        return f"🇺🇦 <b>{title}</b>" + (f"\n\n{body}" if body else "")
+        post = f"🇺🇦 <b>{title}</b>" + (f"\n\n{body}" if body else "")
+        if include_signature:
+            post += f"\n\n<a href=\"https://t.me/{CHANNEL_HANDLE}\"><b>{CHANNEL_NAME}</b></a>"
+        return post
 
     def source_time_ukraine(self, raw):
         value = getattr(raw, "published_at", None)
@@ -190,7 +195,7 @@ class ModerationBot:
         try:
             await self._publish_media(
                 data["media"] or [],
-                self.render(data["title"], data["text"]),
+                self.render(data["title"], data["text"], include_signature=True),
             )
             self.db.set_status(data["url"], "published")
             self.db.delete_pending(item_id)
