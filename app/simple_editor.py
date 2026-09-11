@@ -77,7 +77,7 @@ def _is_too_close_to_source(source, edited):
     edited = re.sub(r"\s+", " ", str(edited or "")).strip().lower()
     if len(source) < 45 or len(edited) < 45:
         return False
-    return SequenceMatcher(None, source, edited).ratio() >= 0.84
+    return SequenceMatcher(None, source, edited).ratio() >= 0.96
 
 def _strip_repeated_lead(title, text):
     text = str(text or "").strip()
