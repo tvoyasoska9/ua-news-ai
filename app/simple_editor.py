@@ -1,5 +1,6 @@
 import json
 import re
+from difflib import SequenceMatcher
 from html import escape
 
 from openai import AsyncOpenAI
@@ -18,10 +19,13 @@ CRITICAL POST-INTEGRITY RULES:
 4. Each block has a fixed type: NORMAL or QUOTE. Translate/paraphrase only its content; the application will restore the visual Telegram formatting.
 5. Preserve every factual statement, number, name, date, place and meaningful detail.
 6. This is NOT summarization. Do not shorten the post.
-7. If source is not Ukrainian, translate all factual content into Ukrainian. If it is Ukrainian, only lightly edit wording.
-8. Do not invent emoji, bullets, slogans, opinions or facts.
-9. The title must be a concise factual Ukrainian headline.
-10. The first body block must NEVER restate the headline as a sentence. The headline and body have different jobs: the headline announces the news; the body immediately adds new facts. If the source begins by repeating the headline, omit only that repeated sentence from the first body block while preserving all following factual content.
+7. EVERY Ukrainian source block must be genuinely paraphrased into fresh Ukrainian wording. Do NOT merely copy the original and make cosmetic edits.
+8. Do not copy full source sentences verbatim, except for unavoidable proper names, exact numbers, official titles, direct quotations, or very short fixed phrases.
+9. Preserve the same facts, numbers, names, dates, places and meaning, but change sentence construction and wording wherever naturally possible.
+10. If the source is not Ukrainian, translate it into natural Ukrainian and still rewrite it as an original news text.
+11. Do not invent emoji, bullets, slogans, opinions or facts.
+12. The title must be a concise factual Ukrainian headline and must also be written in original wording, not copied verbatim from the source.
+13. The first body block must NEVER restate the headline as a sentence. The headline and body have different jobs: the headline announces the news; the body immediately adds new facts. If the source begins by repeating the headline, omit only that repeated sentence from the first body block while preserving all following factual content.
 
 RETURN JSON ONLY:
 {"title":"...","blocks":["translated block 1","translated block 2","..."]}
@@ -67,6 +71,13 @@ def _word_set(value):
         w for w in re.findall(r"[a-zа-яіїєґ0-9]+", str(value or "").lower(), flags=re.UNICODE)
         if len(w) > 2
     }
+
+def _is_too_close_to_source(source, edited):
+    source = re.sub(r"\s+", " ", str(source or "")).strip().lower()
+    edited = re.sub(r"\s+", " ", str(edited or "")).strip().lower()
+    if len(source) < 45 or len(edited) < 45:
+        return False
+    return SequenceMatcher(None, source, edited).ratio() >= 0.84
 
 def _strip_repeated_lead(title, text):
     text = str(text or "").strip()
@@ -150,6 +161,12 @@ class SimpleNewsEditor:
                     if not value and source["text"]:
                         raise ValueError("AI returned empty factual block")
                     edited_blocks.append({"type": source["type"], "text": value})
+
+                if any(
+                    _is_too_close_to_source(source["text"], edited["text"])
+                    for source, edited in zip(blocks, edited_blocks)
+                ):
+                    raise ValueError("AI copied source wording instead of paraphrasing")
 
                 edited_blocks = remove_repeated_headline(title, edited_blocks)
                 text = render_blocks(edited_blocks)
