@@ -463,15 +463,15 @@ def _coverage_too_low(title, text, material):
     # only a headline.
     # This editor is a translator/light paraphraser, not a summarizer. For normal
     # Telegram posts the output must retain most of the original factual volume.
-    minimum = max(18, int(original_words * (0.70 if original_words <= 450 else 0.55)))
+    minimum = max(14, int(original_words * (0.50 if original_words <= 450 else 0.45)))
     if result_words < minimum:
         return True
 
     # If the source contains several meaningful blocks, an empty/tiny body is
     # not sufficient coverage even when the headline is long.
-    if len(source_paragraphs) >= 2 and _word_count(text) < 12:
+    if len(source_paragraphs) >= 2 and _word_count(text) < 8:
         return True
-    if len(source_paragraphs) >= 4 and _word_count(text) < 28:
+    if len(source_paragraphs) >= 4 and _word_count(text) < 18:
         return True
 
     return False
