@@ -1,35 +1,35 @@
 import json
 import re
+from html import escape
+
 from openai import AsyncOpenAI
+
 from app.models import EditedNews
 
 SYSTEM = """You process exactly one Telegram news post.
 
 GOAL:
-Return the SAME news in clean Ukrainian. This is NOT summarization.
+Return the same news in clean Ukrainian WITHOUT destroying the original Telegram composition.
 
-MANDATORY RULES:
-1. Read the ENTIRE source post from beginning to end.
-2. Preserve EVERY factual statement, number, name, date, place, quote and meaningful detail.
-3. NEVER summarize, shorten, merge away facts, omit paragraphs or invent information.
-4. If the source is not Ukrainian, translate ALL factual content into Ukrainian.
-5. If the source is already Ukrainian, only lightly paraphrase wording where useful.
-6. Remove ONLY channel names, usernames, subscription prompts, advertising, reaction/footer noise and source branding.
-7. Keep the original paragraph order and paragraph structure. Do not turn normal paragraphs into a list.
-8. Do NOT invent emoji, bullets, blockquotes, slogans, opinions or additional sentences.
-9. The title must be a short factual Ukrainian headline.
-10. The body must continue the news and MUST NOT repeat the title as its first paragraph.
-11. Keep all remaining source paragraphs complete and natural.
-12. Return JSON only:
-   {"title":"...","text":"..."}
+CRITICAL POST-INTEGRITY RULES:
+1. Read every source block from beginning to end.
+2. Return EXACTLY the same number of blocks, in EXACTLY the same order.
+3. Never merge blocks. Never split blocks. Never delete a factual block. Never add a new block.
+4. Each block has a fixed type: NORMAL or QUOTE. Translate/paraphrase only its content; the application will restore the visual Telegram formatting.
+5. Preserve every factual statement, number, name, date, place and meaningful detail.
+6. This is NOT summarization. Do not shorten the post.
+7. If source is not Ukrainian, translate all factual content into Ukrainian. If it is Ukrainian, only lightly edit wording.
+8. Do not invent emoji, bullets, slogans, opinions or facts.
+9. The title must be a concise factual Ukrainian headline.
+10. The first body block must not mechanically repeat the title if it is the same headline.
 
-TEXT FORMATTING RULE:
-Use normal paragraphs separated by one blank line. Do not use list markers unless the source itself is explicitly a list.
+RETURN JSON ONLY:
+{"title":"...","blocks":["translated block 1","translated block 2","..."]}
+
+The blocks array length MUST equal the source blocks array length exactly.
 """
 
-NOISE = re.compile(
-    r"(?im)^.*(?:t\.me/|subscribe|підписатись|підписатися|подписаться|надіслати новину|прислать новость|підписатися на канал).*$"
-)
+NOISE = re.compile(r"(?im)^.*(?:t\.me/|subscribe|підписатись|підписатися|подписаться|надіслати новину|прислать новость).*$")
 
 def clean(value):
     lines = []
@@ -41,26 +41,43 @@ def clean(value):
         if NOISE.search(line):
             continue
         lines.append(line)
-    text = "\n".join(lines)
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    return text.strip()
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
 
-def norm(value):
-    return re.sub(r"[^\wіїєґа-я0-9]+", "", str(value or "").lower(), flags=re.UNICODE)
+def plain_norm(value):
+    value = re.sub(r"<[^>]+>", " ", str(value or "")).lower()
+    value = re.sub(r"[^\wіїєґа-я0-9]+", "", value, flags=re.UNICODE)
+    return value
 
-def remove_repeated_headline(title, text):
-    paragraphs = [p.strip() for p in re.split(r"\n\s*\n+", text) if p.strip()]
-    if not paragraphs:
-        return ""
+def source_blocks(news):
+    blocks = []
+    for block in (getattr(news, "blocks", None) or []):
+        if not isinstance(block, dict):
+            continue
+        text = clean(block.get("text"))
+        if text:
+            kind = "quote" if str(block.get("type") or "").lower() == "quote" else "normal"
+            blocks.append({"type": kind, "text": text})
+    if blocks:
+        return blocks
+    material = clean(news.summary or news.title)
+    return [{"type": "normal", "text": p.strip()} for p in re.split(r"\n\s*\n+", material) if p.strip()]
 
-    a = norm(title)
-    first = paragraphs[0]
-    b = norm(first)
-
+def remove_repeated_headline(title, blocks):
+    if not blocks:
+        return blocks
+    first = blocks[0]["text"].strip()
+    a, b = plain_norm(title), plain_norm(first)
     if a and b and (a == b or (len(a) > 20 and (a in b or b in a))):
-        paragraphs.pop(0)
+        blocks = [dict(x) for x in blocks]
+        blocks[0]["text"] = ""
+    return [x for x in blocks if x["text"].strip()]
 
-    return "\n\n".join(paragraphs).strip()
+def render_blocks(blocks):
+    rendered = []
+    for block in blocks:
+        text = escape(block["text"], quote=False)
+        rendered.append(f"<blockquote>{text}</blockquote>" if block["type"] == "quote" else text)
+    return "\n\n".join(rendered).strip()
 
 class SimpleNewsEditor:
     def __init__(self, api_key, model, max_completion_tokens=8000):
@@ -78,23 +95,39 @@ class SimpleNewsEditor:
                 {"role": "user", "content": material},
             ],
         )
-        content = response.choices[0].message.content or "{}"
-        return json.loads(content)
+        return json.loads(response.choices[0].message.content or "{}")
 
     async def edit(self, news):
-        material = clean(news.summary or news.title)
-        if not material:
+        blocks = source_blocks(news)
+        if not blocks:
             raise ValueError("empty source post")
+
+        payload = {"source_blocks": [
+            {"index": i + 1, "type": block["type"].upper(), "text": block["text"]}
+            for i, block in enumerate(blocks)
+        ]}
 
         last_error = None
         for _ in range(3):
             try:
-                data = await self._call(material)
+                data = await self._call(json.dumps(payload, ensure_ascii=False))
                 title = clean(data.get("title")) or clean(news.title)
-                text = remove_repeated_headline(title, clean(data.get("text")))
-                if title and text:
+                result = data.get("blocks")
+                if not isinstance(result, list) or len(result) != len(blocks):
+                    raise ValueError("AI changed block count")
+
+                edited_blocks = []
+                for source, value in zip(blocks, result):
+                    value = clean(value)
+                    if not value and source["text"]:
+                        raise ValueError("AI returned empty factual block")
+                    edited_blocks.append({"type": source["type"], "text": value})
+
+                edited_blocks = remove_repeated_headline(title, edited_blocks)
+                text = render_blocks(edited_blocks)
+                if title and (text or len(blocks) == 1):
                     return EditedNews(title, text, "news", 10, "high", [], "")
-                last_error = ValueError("incomplete model output")
+                raise ValueError("incomplete model output")
             except Exception as exc:
                 last_error = exc
 
