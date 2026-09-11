@@ -289,9 +289,12 @@ class NewsPipeline:
                         edited = await self.editor.repair(raw, reason)
                         self.db.record_metric(raw.url, raw.source, "model_completed")
                     except QualityError as repair_error:
+                        # Availability takes priority over stylistic rejection:
+                        # keep processing subsequent candidates without stopping
+                        # the monitoring loop.
                         self.db.set_status(raw.url, "quality_rejected_final")
                         log.warning(
-                            "Draft rejected after repair; continuing with other fresh news | source=%s | title=%s | reason=%s",
+                            "Draft rejected after repair; continuing pipeline | source=%s | title=%s | reason=%s",
                             raw.source,
                             raw.title[:100],
                             str(repair_error),
