@@ -96,7 +96,7 @@ def get_settings():
         # Keep SQLite bounded on a long-running Railway deployment.
         history_retention_days=bounded_int("HISTORY_RETENTION_DAYS", 30, 7, 180),
         # Retries are only used for transient API failures.
-        ai_max_retries=bounded_int("AI_MAX_RETRIES", 1, 0, 2),
+        ai_max_retries=bounded_int("AI_MAX_RETRIES", 0, 0, 0),
         max_model_calls_per_day=bounded_int("MAX_MODEL_CALLS_PER_DAY", 30, 1, 500),
         max_prepared_news_per_day=bounded_int("MAX_PREPARED_NEWS_PER_DAY", 15, 1, 100),
     )
