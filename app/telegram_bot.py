@@ -130,7 +130,6 @@ class NewsBot:
 
     def moderation_text(self, item, published_at=None, source=None, original_url=None):
         title, body = self._public_body(item, source)
-        signature = '<b><a href="https://t.me/ukr24live">УКРАЇНА 🇺🇦 LIVE 24</a></b>'
 
         lines = [
             "🟡 <b>НА ПЕРЕВІРКУ</b>",
@@ -138,10 +137,7 @@ class NewsBot:
             f"🇺🇦 <b>{title}</b>",
         ]
         if body:
-            # Exactly one empty line between the news text and channel signature.
-            lines += ["", body, "", signature]
-        else:
-            lines += ["", signature]
+            lines += ["", body]
 
         lines += [
             "",
@@ -156,17 +152,16 @@ class NewsBot:
     def publish_text(self, item):
         title, body = self._public_body(item)
 
-        # Normalize all accidental extra line breaks before publication.
-        # The channel signature must always have exactly one empty line before it.
+        # Final publication contains only the rewritten Ukrainian news.
+        # No source, channel name, link, footer or attribution is appended.
         title = re.sub(r"\n{2,}", "\n", title).strip()
         body = re.sub(r"\n{3,}", "\n\n", body).strip()
 
-        signature = '<b><a href="https://t.me/ukr24live">УКРАЇНА 🇺🇦 LIVE 24</a></b>'
         parts = [f"<b>{title}</b>"]
         if body:
             parts.append(body)
 
-        return "\n\n".join(parts + [signature])
+        return "\n\n".join(parts)
 
     def keyboard(self, item_id):
         return InlineKeyboardMarkup([[
