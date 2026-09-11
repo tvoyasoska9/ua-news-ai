@@ -84,7 +84,7 @@ def get_settings():
         max_article_chars=bounded_int("MAX_ARTICLE_CHARS", 1800, 1200, 3000),
         # Hard guard against a source backlog/restart spending the whole API
         # balance in one polling cycle.
-        max_ai_candidates_per_cycle=bounded_int("MAX_AI_CANDIDATES_PER_CYCLE", 1, 1, 2),
+        max_ai_candidates_per_cycle=bounded_int("MAX_AI_CANDIDATES_PER_CYCLE", 4, 4, 6),
         # The editor must have enough output budget to preserve a complete
         # multi-paragraph Telegram post. A low cap is a direct cause of
         # unfinished sentences and missing paragraphs.
