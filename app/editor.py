@@ -15,6 +15,12 @@ SYSTEM = """
 
 Твоя задача: перекласти матеріал українською та унікально переформулювати його.
 
+МОВА — ЖОРСТКА ВИМОГА:
+- КОЖЕН матеріал без винятку має бути українською мовою, незалежно від мови джерела;
+- якщо оригінал російською, спочатку повністю переклади зміст українською;
+- у title, text і event_key не повинно залишатися російських слів або російських фрагментів;
+- не повертай оригінальний російський заголовок як fallback.
+
 СПОЧАТКУ ПРОАНАЛІЗУЙ ЗМІСТ, А НЕ ОФОРМЛЕННЯ:
 - прочитай ВЕСЬ матеріал від початку до кінця;
 - визнач факти, твердження, причини, наслідки, оцінки спікерів і висновки;
@@ -113,6 +119,29 @@ PROMO_CTA_RE = re.compile(
     r")"
 )
 GENERIC_TITLES = {"новина", "news", "новости", "повідомлення", "повідомлення дня"}
+
+# The AI is explicitly asked to translate every source into Ukrainian.  Do not
+# allow a Russian fallback title/body to bypass that requirement.
+RUSSIAN_EXCLUSIVE_RE = re.compile(r"[ыэёъ]", re.IGNORECASE)
+RUSSIAN_MARKERS = {
+    "это", "этот", "эта", "эти", "этого", "этим", "этом",
+    "что", "чтобы", "который", "которая", "которые", "которого",
+    "сегодня", "сейчас", "только", "еще", "после", "также",
+    "будет", "было", "были", "между", "почему", "новости",
+    "россия", "россии", "россию", "российский", "российские",
+    "заявил", "заявила", "сообщил", "сообщила", "сообщает",
+    "ударила", "ударили", "всего",
+}
+
+
+def _contains_russian_text(value):
+    plain = _plain(value).lower()
+    if not plain:
+        return False
+    if RUSSIAN_EXCLUSIVE_RE.search(plain):
+        return True
+    tokens = set(re.findall(r"(?u)\\b[а-яіїєґёыэъ'-]+\\b", plain))
+    return bool(tokens & RUSSIAN_MARKERS)
 
 
 def _source_aliases(source):
@@ -513,17 +542,23 @@ class NewsEditor:
                 if len(fallback) > 120:
                     cut = max(fallback.rfind(" ", 0, 120), fallback.rfind(",", 0, 120))
                     fallback = fallback[:cut if cut >= 40 else 120].rstrip(" ,:;—–-")
-                if _is_usable_title(fallback):
+                if _is_usable_title(fallback) and not _contains_russian_text(fallback):
                     title = fallback
                 else:
                     original_title = strip_source_mentions(str(news.title or ""), news.source)
-                    if _is_usable_title(original_title):
+                    if _is_usable_title(original_title) and not _contains_russian_text(original_title):
                         title = original_title
                     else:
-                        raise QualityError("no usable factual title")
+                        raise QualityError("no usable Ukrainian factual title")
 
         text = sanitize_news_html(_finish_at_sentence_boundary(text), news.source)
         event_key = strip_source_mentions(data.get("event_key") or title or news.title, news.source)
+
+        # Translation is mandatory for every moderation draft.  A Russian
+        # source must never reach Telegram simply because the model output or
+        # a fallback title passed the other quality checks.
+        if _contains_russian_text(title) or _contains_russian_text(text) or _contains_russian_text(event_key):
+            raise QualityError("result contains Russian-language text; Ukrainian translation is mandatory")
 
         if _title_repeated_in_body(title, text):
             paragraphs = [part.strip() for part in re.split(r"\n\s*\n+", text) if part.strip()]
