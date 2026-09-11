@@ -21,7 +21,7 @@ CRITICAL POST-INTEGRITY RULES:
 7. If source is not Ukrainian, translate all factual content into Ukrainian. If it is Ukrainian, only lightly edit wording.
 8. Do not invent emoji, bullets, slogans, opinions or facts.
 9. The title must be a concise factual Ukrainian headline.
-10. The first body block must not mechanically repeat the title if it is the same headline.
+10. The first body block must NEVER restate the headline as a sentence. The headline and body have different jobs: the headline announces the news; the body immediately adds new facts. If the source begins by repeating the headline, omit only that repeated sentence from the first body block while preserving all following factual content.
 
 RETURN JSON ONLY:
 {"title":"...","blocks":["translated block 1","translated block 2","..."]}
@@ -62,14 +62,42 @@ def source_blocks(news):
     material = clean(news.summary or news.title)
     return [{"type": "normal", "text": p.strip()} for p in re.split(r"\n\s*\n+", material) if p.strip()]
 
+def _word_set(value):
+    return {
+        w for w in re.findall(r"[a-zа-яіїєґ0-9]+", str(value or "").lower(), flags=re.UNICODE)
+        if len(w) > 2
+    }
+
+def _strip_repeated_lead(title, text):
+    text = str(text or "").strip()
+    if not text:
+        return text
+
+    # Compare the headline with the first sentence, not only with the whole
+    # block. This catches the common case where the AI repeats the headline
+    # and then appends new information.
+    sentences = re.split(r"(?<=[.!?…])\s+", text, maxsplit=1)
+    lead = sentences[0].strip()
+    rest = sentences[1].strip() if len(sentences) > 1 else ""
+
+    a, b = plain_norm(title), plain_norm(lead)
+    if a and b and (a == b or a in b or b in a):
+        return rest
+
+    ta, tb = _word_set(title), _word_set(lead)
+    if ta and tb:
+        overlap = len(ta & tb) / max(1, min(len(ta), len(tb)))
+        # A near-identical first sentence is a repeated headline even when
+        # punctuation, word order, or one location phrase differs.
+        if overlap >= 0.72:
+            return rest
+    return text
+
 def remove_repeated_headline(title, blocks):
     if not blocks:
         return blocks
-    first = blocks[0]["text"].strip()
-    a, b = plain_norm(title), plain_norm(first)
-    if a and b and (a == b or (len(a) > 20 and (a in b or b in a))):
-        blocks = [dict(x) for x in blocks]
-        blocks[0]["text"] = ""
+    blocks = [dict(x) for x in blocks]
+    blocks[0]["text"] = _strip_repeated_lead(title, blocks[0]["text"])
     return [x for x in blocks if x["text"].strip()]
 
 def render_blocks(blocks):
