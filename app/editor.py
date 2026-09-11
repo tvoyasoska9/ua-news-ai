@@ -316,7 +316,7 @@ def _normalized_tokens(value):
 
 
 def _has_excessive_source_copy(title, text, material, source_title=""):
-    """Catch copying at title/sentence level, including short Telegram posts."""
+    """Reject copied wording, including short Telegram posts."""
     result = _plain(f"{title}\n{text}")
     source = _plain(material)
     source_headline = _plain(source_title)
@@ -324,39 +324,38 @@ def _has_excessive_source_copy(title, text, material, source_title=""):
     if not result or not source:
         return False
 
-    # A copied headline alone is already unacceptable for a rewritten post.
-    if source_headline and len(_normalized_tokens(title)) >= 7:
-        headline_ratio = fuzz.ratio(
-            re.sub(r"\s+", " ", _plain(title).lower()),
-            re.sub(r"\s+", " ", source_headline.lower()),
-        )
-        headline_tokens = fuzz.token_set_ratio(
-            _plain(title).lower(), source_headline.lower()
-        )
-        if headline_ratio >= 96 and headline_tokens >= 98:
+    def norm(value):
+        return re.sub(r"\s+", " ", _plain(value).lower()).strip()
+
+    title_norm = norm(title)
+    if source_headline and len(_normalized_tokens(title)) >= 5:
+        headline_norm = norm(source_headline)
+        if fuzz.ratio(title_norm, headline_norm) >= 88:
             return True
 
-    source_norm = re.sub(r"\s+", " ", source.lower()).strip()
-    result_norm = re.sub(r"\s+", " ", result.lower()).strip()
-    # token_set_ratio can report 100 when one text is largely a subset of the
-    # other, which is common in a legitimate concise rewrite. Use strong
-    # sequence similarity here and keep the separate verbatim-fragment check
-    # below for actual copied wording.
-    if len(_normalized_tokens(result)) >= 20 and len(_normalized_tokens(source)) >= 20:
-        ratio = fuzz.ratio(source_norm, result_norm)
-        if ratio >= 90:
-            return True
-
-    # Reject any long verbatim fragment copied from the source.
-    result_tokens = _normalized_tokens(result)
+    source_norm = norm(source)
+    result_norm = norm(result)
     source_tokens = _normalized_tokens(source)
-    if len(result_tokens) >= 14 and len(source_tokens) >= 14:
+    result_tokens = _normalized_tokens(result)
+
+    # A short post is not exempt from rewriting. If nearly every word and the
+    # sentence structure are preserved, reject it and force another generation.
+    if len(source_tokens) >= 8 and len(result_tokens) >= 8:
+        ratio = fuzz.ratio(source_norm, result_norm)
+        token_sort = fuzz.token_sort_ratio(source_norm, result_norm)
+        if ratio >= 84 and token_sort >= 90:
+            return True
+
+    # Reject copied fragments of six or more consecutive words. Proper names
+    # and short factual phrases may coincide, but a six-word sequence is enough
+    # to indicate mechanical copying in a Telegram rewrite.
+    if len(source_tokens) >= 6 and len(result_tokens) >= 6:
         source_ngrams = {
-            tuple(source_tokens[i:i+14])
-            for i in range(len(source_tokens) - 13)
+            tuple(source_tokens[i:i + 6])
+            for i in range(len(source_tokens) - 5)
         }
-        for i in range(len(result_tokens) - 13):
-            if tuple(result_tokens[i:i+14]) in source_ngrams:
+        for i in range(len(result_tokens) - 5):
+            if tuple(result_tokens[i:i + 6]) in source_ngrams:
                 return True
 
     return False
@@ -407,11 +406,22 @@ def _material_coverage_too_low(title, text, material):
 def _is_near_verbatim_copy(title, text, material):
     source = re.sub(r"\s+", " ", _plain(material)).strip().lower()
     result = re.sub(r"\s+", " ", _plain(f"{title}\n{text}")).strip().lower()
-    if _word_count(source) < 70 or _word_count(result) < 50:
+    source_tokens = _normalized_tokens(source)
+    result_tokens = _normalized_tokens(result)
+
+    if len(source_tokens) < 8 or len(result_tokens) < 8:
         return False
+
     ratio = fuzz.ratio(source, result)
     token_ratio = fuzz.token_set_ratio(source, result)
-    return ratio >= 88 and token_ratio >= 96
+    token_sort = fuzz.token_sort_ratio(source, result)
+
+    # No length bypass: short source posts must also be genuinely rewritten.
+    return (
+        ratio >= 82
+        or (ratio >= 76 and token_sort >= 88)
+        or (token_ratio >= 97 and token_sort >= 86)
+    )
 
 
 def _title_repeated_in_body(title, body):
@@ -610,6 +620,9 @@ class NewsEditor:
         return SYSTEM + """
 
 ДОДАТКОВИЙ КОНТРОЛЬ ЯКОСТІ:
+- ПЕРЕПИСУВАННЯ ОБОВ'ЯЗКОВЕ ДЛЯ КОЖНОГО ПОСТА, навіть якщо оригінал уже українською.
+- Не повертай жодне речення з оригіналу дослівно. Спочатку виділи факти, потім напиши новий текст іншою синтаксичною конструкцією.
+- Якщо результат можна накласти на оригінал майже слово в слово, він неправильний і його потрібно написати заново.
 - Перед формуванням JSON прочитай весь матеріал і перевір зміст кожного абзацу.
 - Не залишай лише перший абзац, якщо далі є нові факти.
 - Якщо оригінал містить кілька змістовних абзаців, результат повинен передати
