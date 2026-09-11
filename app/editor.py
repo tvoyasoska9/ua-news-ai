@@ -484,10 +484,28 @@ class NewsEditor:
 
     def _build_result(self, data, news, material, original_len):
         title = strip_source_mentions(data.get("title") or "", news.source)
-        if not _is_usable_title(title):
-            raise QualityError("no usable factual title")
 
         text = sanitize_news_html(data.get("text") or "", news.source)
+
+        # Some Telegram posts expose only an emoji as their transport title
+        # (for example "❗️"). The AI may then return an equally useless title
+        # even when it produced a good body. Salvage a factual title from the
+        # first complete sentence instead of wasting another API call.
+        if not _is_usable_title(title):
+            plain_text = _plain(text)
+            candidates = re.split(r"(?<=[.!?…])\s+", plain_text, maxsplit=1)
+            fallback = candidates[0].strip() if candidates else ""
+            if len(fallback) > 120:
+                cut = max(fallback.rfind(" ", 0, 120), fallback.rfind(",", 0, 120))
+                fallback = fallback[:cut if cut >= 40 else 120].rstrip(" ,:;—–-")
+            if _is_usable_title(fallback):
+                title = fallback
+                # Avoid showing the same sentence twice when it became title.
+                if len(candidates) > 1:
+                    text = sanitize_news_html(candidates[1].strip(), news.source)
+            else:
+                raise QualityError("no usable factual title")
+
         text = sanitize_news_html(_finish_at_sentence_boundary(text), news.source)
         event_key = strip_source_mentions(data.get("event_key") or title or news.title, news.source)
 
