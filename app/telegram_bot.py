@@ -59,12 +59,10 @@ class NewsBot:
 
     async def sources(self, update, context):
         if self.allowed(update):
-            from app.sources import RSS_SOURCES, TELEGRAM_SOURCES
-            lines = ["📰 RSS-джерела:"]
-            lines += ["• " + s["name"] for s in RSS_SOURCES]
-            lines += ["", "📢 Telegram-канали:"]
+            from app.sources import TELEGRAM_SOURCES
+            lines = ["📢 <b>TELEGRAM-ДЖЕРЕЛА</b>", ""]
             lines += ["• @" + s["username"] for s in TELEGRAM_SOURCES]
-            await update.effective_message.reply_text("\n".join(lines))
+            await update.effective_message.reply_text("\n".join(lines), parse_mode="HTML")
 
     async def stats(self, update, context):
         if not self.allowed(update):
