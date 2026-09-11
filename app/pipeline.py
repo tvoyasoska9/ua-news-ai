@@ -158,16 +158,25 @@ class NewsPipeline:
             key = fingerprint(raw)
 
             if self.db.exists(raw.url, key):
+                status = self.db.get_status(raw.url) or "unknown"
+                log.info(
+                    "Candidate skipped | reason=already_handled | status=%s | source=%s | title=%s",
+                    status,
+                    raw.source,
+                    raw.title[:120],
+                )
                 _cleanup_media(raw.media_path, raw.media_paths)
                 continue
 
             # Do not spend AI calls on historical backlog.
             if _is_too_old(raw.published_at):
+                log.info("Candidate skipped | reason=stale | source=%s | title=%s", raw.source, raw.title[:120])
                 self.db.add(raw.url, key, raw.title, raw.source, "stale")
                 _cleanup_media(raw.media_path, raw.media_paths)
                 continue
 
             if is_similar_title(raw, pre_ai_titles, threshold=82):
+                log.info("Candidate skipped | reason=title_duplicate | source=%s | title=%s", raw.source, raw.title[:120])
                 self.db.add(raw.url, key, raw.title, raw.source, "duplicate")
                 _cleanup_media(raw.media_path, raw.media_paths)
                 continue
