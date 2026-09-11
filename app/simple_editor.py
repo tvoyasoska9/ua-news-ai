@@ -10,27 +10,34 @@ from app.models import EditedNews
 SYSTEM = """You process exactly one Telegram news post.
 
 GOAL:
-Return the same news in clean Ukrainian WITHOUT destroying the original Telegram composition.
+Create ONE concise, natural Ukrainian Telegram news post from the source facts. The result must read as a single coherent news item, not as several paraphrases of the same event.
 
-CRITICAL POST-INTEGRITY RULES:
-1. Read every source block from beginning to end.
-2. Return EXACTLY the same number of blocks, in EXACTLY the same order.
-3. Never merge blocks. Never split blocks. Never delete a factual block. Never add a new block.
-4. Each block has a fixed type: NORMAL or QUOTE. Translate/paraphrase only its content; the application will restore the visual Telegram formatting.
-5. Preserve every factual statement, number, name, date, place and meaningful detail.
-6. This is NOT summarization. Do not shorten the post.
-7. EVERY Ukrainian source block must be genuinely paraphrased into fresh Ukrainian wording. Do NOT merely copy the original and make cosmetic edits.
-8. Do not copy full source sentences verbatim, except for unavoidable proper names, exact numbers, official titles, direct quotations, or very short fixed phrases.
-9. Preserve the same facts, numbers, names, dates, places and meaning, but change sentence construction and wording wherever naturally possible.
-10. If the source is not Ukrainian, translate it into natural Ukrainian and still rewrite it as an original news text.
-11. Do not invent emoji, bullets, slogans, opinions or facts.
-12. The title must be a concise factual Ukrainian headline and must also be written in original wording, not copied verbatim from the source.
-13. The first body block must NEVER restate the headline as a sentence. The headline and body have different jobs: the headline announces the news; the body immediately adds new facts. If the source begins by repeating the headline, omit only that repeated sentence from the first body block while preserving all following factual content.
+ABSOLUTE ANTI-REPETITION RULES:
+1. State each factual event ONCE. Never repeat the same event in the title and then again in the body using different wording.
+2. The title is the headline. The body must immediately add NEW information that is not already conveyed by the headline.
+3. Do not write a lead sentence that merely rephrases the headline.
+4. Do not repeat the same event across multiple sentences with synonyms (for example: "влучення", then "приліт", then "удар" about the same incident).
+5. If the source itself repeats the same fact, COLLAPSE that repetition. Keep the unique additional detail only.
+6. Prefer the shortest wording that preserves all UNIQUE facts. Do not pad the post.
+7. A good result should move forward: HEADLINE -> new details -> additional unique facts. Never circle back to restate what was already said.
+
+FACTUAL RULES:
+8. Preserve all meaningful unique facts, numbers, names, dates, places and direct quotations.
+9. Do not invent facts, opinions, explanations or certainty that the source does not contain.
+10. Ukrainian source text must be genuinely rewritten into fresh Ukrainian wording, not copied verbatim except unavoidable names, exact numbers, official titles and direct quotations.
+11. If the source is not Ukrainian, translate it into natural Ukrainian.
+12. Preserve useful quote formatting: QUOTE source blocks remain QUOTE blocks. Normal blocks remain NORMAL blocks where possible.
+
+COMPOSITION:
+13. Return a concise factual headline.
+14. Remove redundant sentences instead of paraphrasing them again.
+15. Do NOT force the same number of blocks as the source. Redundant source blocks may be omitted. Never create duplicate blocks.
+16. The first normal block must contain genuinely NEW information beyond the title.
 
 RETURN JSON ONLY:
-{"title":"...","blocks":["translated block 1","translated block 2","..."]}
+{"title":"...","blocks":["block 1","block 2","..."]}
 
-The blocks array length MUST equal the source blocks array length exactly.
+The blocks array contains only useful, non-redundant content in logical order.
 """
 
 NOISE = re.compile(r"(?im)^.*(?:t\.me/|subscribe|підписатись|підписатися|подписаться|надіслати новину|прислать новость).*$")
@@ -100,7 +107,7 @@ def _strip_repeated_lead(title, text):
         overlap = len(ta & tb) / max(1, min(len(ta), len(tb)))
         # A near-identical first sentence is a repeated headline even when
         # punctuation, word order, or one location phrase differs.
-        if overlap >= 0.72:
+        if overlap >= 0.55:
             return rest
     return text
 
@@ -152,15 +159,18 @@ class SimpleNewsEditor:
                 data = await self._call(json.dumps(payload, ensure_ascii=False))
                 title = clean(data.get("title")) or clean(news.title)
                 result = data.get("blocks")
-                if not isinstance(result, list) or len(result) != len(blocks):
-                    raise ValueError("AI changed block count")
+                if not isinstance(result, list) or not result:
+                    raise ValueError("AI returned no usable blocks")
 
                 edited_blocks = []
-                for source, value in zip(blocks, result):
+                for i, value in enumerate(result):
                     value = clean(value)
-                    if not value and source["text"]:
-                        raise ValueError("AI returned empty factual block")
-                    edited_blocks.append({"type": source["type"], "text": value})
+                    if not value:
+                        continue
+                    source_type = blocks[min(i, len(blocks) - 1)]["type"]
+                    edited_blocks.append({"type": source_type, "text": value})
+                if not edited_blocks:
+                    raise ValueError("AI returned empty blocks")
 
                 if any(
                     _is_too_close_to_source(source["text"], edited["text"])
