@@ -124,11 +124,38 @@ class NewsPipeline:
             self.db.cleanup_history(self.settings.history_retention_days)
             self._last_cleanup = now
 
+        # Do not keep spending AI calls after enough news already exist to
+        # fill today's publication target. Capacity is based on successfully
+        # published news plus cards already waiting for moderation plus the
+        # in-memory queue that has already passed AI.
+        published_today = self.db.daily_count("published_news")
+        pending_moderation = self.db.pending_count()
+        queued_ready = len(self.queue)
+        remaining_target = (
+            self.settings.max_published_news_per_day
+            - published_today
+            - pending_moderation
+            - queued_ready
+        )
+        if remaining_target <= 0:
+            log.info(
+                "Publication target capacity is full | published=%s pending=%s queued=%s target=%s",
+                published_today,
+                pending_moderation,
+                queued_ready,
+                self.settings.max_published_news_per_day,
+            )
+            return
+
         items = await collect_news(self.settings)
 
         # collect_news() is Telegram-only. Preserve the collector's strict
         # round-robin order across configured channels.
-        log.info("Collected %s Telegram candidates from configured channels", len(items))
+        log.info(
+            "Collected %s Telegram candidates; remaining publication capacity: %s",
+            len(items),
+            remaining_target,
+        )
 
         # Cheap duplicate screening happens before OpenAI. Keep titles seen in
         # this very cycle as well, otherwise five channels can spend five AI
@@ -157,10 +184,13 @@ class NewsPipeline:
             # A restart or a sudden source backlog must not burn the entire API
             # balance in a single minute. Remaining fresh items are retried on
             # the next cycle and are still protected by their age limit.
-            if ai_attempts >= self.settings.max_ai_candidates_per_cycle:
+            # Never prepare more items than can still fit the publication
+            # target, even if the daily AI safety budget is much larger.
+            if ai_attempts >= min(self.settings.max_ai_candidates_per_cycle, remaining_target):
                 log.info(
-                    "AI cycle limit (%s) reached; remaining candidates wait for the next poll",
+                    "AI cycle/target capacity reached (%s candidates this cycle; %s target slots remain)",
                     self.settings.max_ai_candidates_per_cycle,
+                    remaining_target,
                 )
                 break
 
