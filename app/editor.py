@@ -524,51 +524,11 @@ class NewsEditor:
                 paragraphs = paragraphs[1:]
             text = "\n\n".join(paragraphs).strip()
 
-        # If the draft is suspiciously short, make one targeted repair call.
-        # The repair is asked to analyze the original content again and restore
-        # omitted facts; it is not a blind retry of the same prompt.
-        if len(original_plain) <= 3200 and (
-            _material_coverage_too_low(title, text, material)
-            or _is_near_verbatim_copy(title, text, material)
-        ):
-            repair_system = SYSTEM + """
-РЕЖИМ ВІДНОВЛЕННЯ ПОВНОТИ:
-Нижче є ОРИГІНАЛ і ЧЕРНЕТКА, яка могла втратити частину змісту.
-Порівняй їх ЗА ЗМІСТОМ абзац за абзацом. Віднови всі фактичні твердження,
-які є в оригіналі, але відсутні в чернетці. Не додавай нових фактів.
-Не орієнтуйся на емодзі, форматування або перші рядки. Поверни повний
-готовий JSON із завершеними реченнями.
-"""
-            repair_response = await self._request([
-                {"role": "system", "content": repair_system},
-                {
-                    "role": "user",
-                    "content": (
-                        f"ОРИГІНАЛ:\n{material}\n\n"
-                        f"ЧЕРНЕТКА TITLE:\n{title}\n\n"
-                        f"ЧЕРНЕТКА TEXT:\n{text}\n\n"
-                        "Віднови пропущені факти та збережи природну структуру."
-                    ),
-                },
-            ], max_completion_tokens=completion_budget)
-
-            try:
-                repaired = json.loads(repair_response.choices[0].message.content or "{}")
-                repaired_title = strip_source_mentions(repaired.get("title") or "", news.source)
-                repaired_text = sanitize_news_html(repaired.get("text") or "", news.source)
-                repaired_text = sanitize_news_html(_finish_at_sentence_boundary(repaired_text), news.source)
-                if _is_usable_title(repaired_title):
-                    repaired_event = strip_source_mentions(
-                        repaired.get("event_key") or repaired_title or event_key,
-                        news.source,
-                    )
-                    if not _material_coverage_too_low(repaired_title, repaired_text, material):
-                        title = repaired_title
-                        text = repaired_text
-                        event_key = repaired_event
-            except Exception:
-                # A malformed repair response must never break moderation.
-                pass
+        # Strict one-request accounting: validation must never trigger a hidden
+        # second rewrite. A candidate that loses too much factual coverage is
+        # rejected and logged by the pipeline instead of spending another call.
+        if _material_coverage_too_low(title, text, material):
+            raise ValueError("AI output lost too much factual coverage")
 
         # Never replace an imperfect AI draft with the original source text.
         # The previous "lossless fallback" could publish a Telegram post almost
