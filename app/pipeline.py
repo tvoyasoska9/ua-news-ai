@@ -277,6 +277,12 @@ class NewsPipeline:
             except ValueError:
                 pass
 
+            if self._prepared_news_limit_reached():
+                self.db.set_status(url, "daily_limit")
+                _cleanup_media(media_path, media_paths)
+                log.info("Daily prepared-news limit reached (%s)", self.settings.max_prepared_news_per_day)
+                continue
+
             try:
                 await self.bot.send_for_moderation(
                     edited,
@@ -291,6 +297,8 @@ class NewsPipeline:
                 )
                 self.db.set_status(url, "moderation")
                 self.db.record_metric(url, source, "moderation")
+                if not self.db.try_consume_daily("prepared_news", self.settings.max_prepared_news_per_day):
+                    log.error("Prepared-news quota race detected after moderation send")
                 log.info(
                     "Sent fresh news to moderation. Waiting %s seconds before next item.",
                     self.settings.moderation_interval_seconds,
