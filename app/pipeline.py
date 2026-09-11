@@ -133,6 +133,9 @@ class NewsPipeline:
         # round-robin order across configured channels.
         log.info("Collected %s Telegram candidates from configured channels", len(items))
 
+        if self._prepared_news_limit_reached():
+            return
+
         # Cheap duplicate screening happens before OpenAI. Keep titles seen in
         # this very cycle as well, otherwise five channels can spend five AI
         # calls on the same event before the first result reaches moderation.
