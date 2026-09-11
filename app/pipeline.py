@@ -157,7 +157,7 @@ class NewsPipeline:
         for raw in items:
             key = fingerprint(raw)
 
-            if self.db.exists(raw.url, key):
+            if self.db.exists(raw.url):
                 status = self.db.get_status(raw.url) or "unknown"
                 log.info(
                     "Candidate skipped | reason=already_handled | status=%s | source=%s | title=%s",
