@@ -255,20 +255,38 @@ class NewsPipeline:
                     edited = await self.editor.edit(raw)
                     self.db.record_metric(raw.url, raw.source, "model_completed")
                 except QualityError as quality_error:
-                    # One candidate gets one model generation only. Deterministic
-                    # quality failures are rejected instead of spending a second
-                    # model call on automatic repair.
+                    # A deterministic gate failure is retryable once. The first
+                    # generation may be too literal or too short even when the
+                    # underlying news is valid. Make one explicit fresh rewrite
+                    # instead of permanently losing the news.
                     reason = str(quality_error)
-                    self.db.set_status(raw.url, "quality_rejected")
                     self.db.record_metric(raw.url, raw.source, "ai_quality_failed")
-                    log.warning(
-                        "Draft rejected by quality gate without repair | source=%s | title=%s | reason=%s",
-                        raw.source,
-                        raw.title[:100],
-                        reason,
-                    )
-                    _cleanup_media(raw.media_path, raw.media_paths)
-                    continue
+                    if not self._consume_model_slot():
+                        self.db.set_status(raw.url, "daily_model_limit")
+                        log.warning("Daily model-call limit reached before repair (%s)", self.settings.max_model_calls_per_day)
+                        _cleanup_media(raw.media_path, raw.media_paths)
+                        break
+                    self.db.record_metric(raw.url, raw.source, "ai_repair")
+                    try:
+                        edited = await self.editor.repair(raw, reason)
+                        self.db.record_metric(raw.url, raw.source, "model_completed")
+                    except QualityError as repair_error:
+                        self.db.set_status(raw.url, "quality_rejected_final")
+                        log.warning(
+                            "Draft rejected after one repair | source=%s | title=%s | reason=%s",
+                            raw.source,
+                            raw.title[:100],
+                            str(repair_error),
+                        )
+                        _cleanup_media(raw.media_path, raw.media_paths)
+                        continue
+                    except Exception:
+                        log.exception("AI repair failed")
+                        self.db.release_daily("model_calls")
+                        self.db.set_status(raw.url, "error_retry")
+                        self.db.record_metric(raw.url, raw.source, "ai_error")
+                        _cleanup_media(raw.media_path, raw.media_paths)
+                        continue
             except Exception:
                 log.exception("AI editing failed")
                 # The model did not produce a usable response, so return the
