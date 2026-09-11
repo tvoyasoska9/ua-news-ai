@@ -151,16 +151,18 @@ class NewsPipeline:
         # represent candidates waiting for a human decision, and in-memory queue
         # items are about to become cards. Once they can fill the remaining daily
         # publication target, stop before collection/media/AI work entirely.
+        # Keep monitoring continuously throughout the day. Pending moderation
+        # cards must NOT stop collection: otherwise one unattended card can make
+        # the bot appear dead even though new source posts are arriving.
         pending_fresh = self.db.pending_count(max_age_minutes=MAX_QUEUE_AGE_MINUTES)
-        preparation_capacity = max(0, remaining_target - pending_fresh - len(self.queue))
-        if preparation_capacity <= 0:
+        queue_capacity = max(0, MAX_QUEUE_SIZE - len(self.queue))
+        if queue_capacity <= 0:
             log.info(
-                "Preparation paused | published=%s/%s pending=%s queue=%s remaining_target=%s",
+                "In-memory queue full | published=%s/%s pending=%s queue=%s; moderation worker will drain it",
                 published_today,
                 self.settings.max_published_news_per_day,
                 pending_fresh,
                 len(self.queue),
-                remaining_target,
             )
             return
 
@@ -221,7 +223,9 @@ class NewsPipeline:
             # balance in a single minute. The publication target is enforced
             # only on successful publication, so moderation cards themselves do
             # not reduce the number of candidates that may be prepared.
-            cycle_cap = min(self.settings.max_ai_candidates_per_cycle, preparation_capacity)
+            # Throughput is limited by the cycle cap and queue capacity, never
+            # by pending moderation cards.
+            cycle_cap = min(self.settings.max_ai_candidates_per_cycle, max(1, queue_capacity))
             if ai_attempts >= cycle_cap:
                 log.info(
                     "AI cycle capacity reached (%s candidate(s); published=%s/%s pending=%s queue=%s)",
