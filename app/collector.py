@@ -10,11 +10,10 @@ from pathlib import Path
 from urllib.parse import urljoin
 
 import aiohttp
-import feedparser
 from bs4 import BeautifulSoup
 
 from app.models import RawNews
-from app.sources import RSS_SOURCES, TELEGRAM_SOURCES
+from app.sources import TELEGRAM_SOURCES
 
 log = logging.getLogger(__name__)
 
@@ -362,9 +361,8 @@ async def materialize_rss_article(news):
 
 
 async def materialize_news(news):
-    """Materialize expensive source data only for the selected AI candidate."""
+    """Materialize selected Telegram media only after local screening."""
     await materialize_telegram_media(news)
-    await materialize_rss_article(news)
     return news
 
 
@@ -694,28 +692,13 @@ async def collect_telegram_news(settings):
 
 
 async def collect_news(settings):
-    rss_task = asyncio.create_task(collect_rss_news())
-    telegram_task = asyncio.create_task(collect_telegram_news(settings))
-
-    rss_items, telegram_items = await asyncio.gather(
-        rss_task,
-        telegram_task,
-        return_exceptions=True,
-    )
-
-    if isinstance(rss_items, Exception):
-        log.exception("RSS collection failed", exc_info=rss_items)
-        rss_items = []
-    if isinstance(telegram_items, Exception):
-        log.exception("Telegram collection failed", exc_info=telegram_items)
-        telegram_items = []
-
+    """Collect news exclusively from configured Telegram channels."""
+    telegram_items = await collect_telegram_news(settings)
     log.info(
-        "Source collection complete: %s Telegram candidates (PRIMARY), %s RSS candidates (SECONDARY)",
-        len(telegram_items), len(rss_items)
+        "Telegram-only collection complete: %s candidates from configured channels",
+        len(telegram_items),
     )
-    return list(telegram_items) + list(rss_items)
-
+    return list(telegram_items)
 
 async def close_telegram_client():
     global _telegram_client
