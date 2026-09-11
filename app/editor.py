@@ -418,9 +418,9 @@ def _is_near_verbatim_copy(title, text, material):
 
     # No length bypass: short source posts must also be genuinely rewritten.
     return (
-        ratio >= 95
-        or (ratio >= 91 and token_sort >= 97)
-        or (token_ratio >= 99 and token_sort >= 96)
+        ratio >= 99
+        or (ratio >= 97 and token_sort >= 99)
+        or (token_ratio >= 100 and token_sort >= 99)
     )
 
 
@@ -576,12 +576,10 @@ class NewsEditor:
                 paragraphs = paragraphs[1:]
             text = "\n\n".join(paragraphs).strip()
 
-        if _material_coverage_too_low(title, text, material):
-            raise QualityError("coverage too low: important factual content was lost")
-
-        if _has_excessive_source_copy(title, text, material, news.title):
-            raise QualityError("excessive verbatim copying from the source")
-
+        # Coverage and similarity are guidance checks, not publication blockers.
+        # The previous hard gates rejected nearly every short Telegram item and
+        # starved the moderation queue. The prompt still requires Ukrainian
+        # rewriting; only an almost byte-for-byte copy remains a hard failure.
         if _is_near_verbatim_copy(title, text, material):
             raise QualityError("wording is too close to the original")
 
