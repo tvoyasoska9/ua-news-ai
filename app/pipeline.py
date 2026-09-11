@@ -77,7 +77,7 @@ class NewsPipeline:
             settings.ai_max_retries,
         )
 
-        reopened = self.db.reopen_recent_quality_rejections(hours=6)
+        reopened = self.db.reopen_recent_quality_rejections(hours=24)
         if reopened:
             log.info("Reopened %s recent quality-rejected candidate(s) after quality-gate update", reopened)
 
