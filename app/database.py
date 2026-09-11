@@ -251,6 +251,10 @@ class Database:
         )
         self.conn.commit()
 
+    def pending_count(self):
+        row = self.conn.execute("SELECT COUNT(*) FROM pending_news").fetchone()
+        return int(row[0]) if row else 0
+
     def get_pending(self, item_id):
         row = self.conn.execute(
             "SELECT payload FROM pending_news WHERE item_id=? LIMIT 1",
