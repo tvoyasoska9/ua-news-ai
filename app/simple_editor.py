@@ -10,7 +10,7 @@ from app.models import EditedNews
 SYSTEM = """You process exactly one Telegram news post.
 
 GOAL:
-Create ONE concise, natural Ukrainian Telegram news post from the source facts. The result must read as a single coherent news item, not as several paraphrases of the same event.
+Create ONE concise, natural Ukrainian Telegram news post written COMPLETELY IN YOUR OWN WORDS from the source facts. The source is evidence for facts, NOT a text template. The result must read as an independently written news item, not as a lightly edited copy.
 
 ABSOLUTE ANTI-REPETITION RULES:
 1. State each factual event ONCE. Never repeat the same event in the title and then again in the body using different wording.
@@ -24,9 +24,10 @@ ABSOLUTE ANTI-REPETITION RULES:
 FACTUAL RULES:
 8. Preserve all meaningful unique facts, numbers, names, dates, places and direct quotations.
 9. Do not invent facts, opinions, explanations or certainty that the source does not contain.
-10. Ukrainian source text must be genuinely rewritten into fresh Ukrainian wording, not copied verbatim except unavoidable names, exact numbers, official titles and direct quotations.
-11. If the source is not Ukrainian, translate it into natural Ukrainian.
-12. Preserve useful quote formatting: QUOTE source blocks remain QUOTE blocks. Normal blocks remain NORMAL blocks where possible.
+10. Ukrainian source text must be genuinely rewritten into fresh Ukrainian wording. Do not preserve source sentences, sentence order, syntax, or long phrases. Rebuild each sentence from the facts. Only unavoidable names, exact numbers, official titles and direct quotations may coincide.
+11. Before returning the answer, compare mentally with the source: if a sentence could be pasted back into the source unchanged, rewrite it.
+12. If the source is not Ukrainian, translate it into natural Ukrainian.
+13. Preserve useful quote formatting only when it contains a genuine quotation. Otherwise write normal blocks naturally.
 
 COMPOSITION:
 13. Return a concise factual headline.
@@ -80,11 +81,24 @@ def _word_set(value):
     }
 
 def _is_too_close_to_source(source, edited):
+    """Reject light edits and long verbatim runs, not only exact copies."""
     source = re.sub(r"\s+", " ", str(source or "")).strip().lower()
     edited = re.sub(r"\s+", " ", str(edited or "")).strip().lower()
-    if len(source) < 45 or len(edited) < 45:
+    if not source or not edited:
         return False
-    return SequenceMatcher(None, source, edited).ratio() >= 0.96
+
+    ratio = SequenceMatcher(None, source, edited).ratio()
+    if len(source) >= 45 and len(edited) >= 45 and ratio >= 0.82:
+        return True
+
+    src_words = re.findall(r"(?u)\b[\w’'-]+\b", source)
+    out_words = re.findall(r"(?u)\b[\w’'-]+\b", edited)
+    if len(src_words) >= 7 and len(out_words) >= 7:
+        runs = {tuple(src_words[i:i+7]) for i in range(len(src_words)-6)}
+        if any(tuple(out_words[i:i+7]) in runs for i in range(len(out_words)-6)):
+            return True
+
+    return False
 
 def _strip_repeated_lead(title, text):
     text = str(text or "").strip()
@@ -157,7 +171,11 @@ class SimpleNewsEditor:
         for _ in range(3):
             try:
                 data = await self._call(json.dumps(payload, ensure_ascii=False))
-                title = clean(data.get("title")) or clean(news.title)
+                title = clean(data.get("title"))
+                if not title:
+                    raise ValueError("AI returned no rewritten title")
+                if _is_too_close_to_source(clean(news.title), title):
+                    raise ValueError("AI copied source headline instead of rewriting it")
                 result = data.get("blocks")
                 if not isinstance(result, list) or not result:
                     raise ValueError("AI returned no usable blocks")
@@ -172,14 +190,20 @@ class SimpleNewsEditor:
                 if not edited_blocks:
                     raise ValueError("AI returned empty blocks")
 
+                # Check every generated block against every source block.
+                # The model must not hide a copied sentence by moving it to
+                # another position.
                 if any(
                     _is_too_close_to_source(source["text"], edited["text"])
-                    for source, edited in zip(blocks, edited_blocks)
+                    for source in blocks
+                    for edited in edited_blocks
                 ):
-                    raise ValueError("AI copied source wording instead of paraphrasing")
+                    raise ValueError("AI copied source wording instead of rewriting it")
 
                 edited_blocks = remove_repeated_headline(title, edited_blocks)
                 text = render_blocks(edited_blocks)
+                if _is_too_close_to_source(clean(news.summary or news.title), f"{title}\n{text}"):
+                    raise ValueError("final draft remains too close to the source")
                 if title and (text or len(blocks) == 1):
                     return EditedNews(title, text, "news", 10, "high", [], "")
                 raise ValueError("incomplete model output")
