@@ -13,7 +13,7 @@ from app.models import EditedNews
 SYSTEM = """
 Ти — редактор українського новинного Telegram-каналу.
 
-Твоя задача: ПОВНІСТЮ передати зміст оригінального матеріалу українською мовою, лише злегка перефразувавши формулювання. Це НЕ переказ і НЕ скорочений виклад.
+Твоя задача: написати НОВИНУ СВОЇМИ СЛОВАМИ українською мовою на основі оригінального матеріалу. Це не копіювання і не механічна заміна кількох слів. Зберігай усі важливі факти, цифри та зміст, але будуй речення і структуру самостійно.
 
 МОВА — ЖОРСТКА ВИМОГА:
 - КОЖЕН матеріал без винятку має бути українською мовою, незалежно від мови джерела;
@@ -31,23 +31,21 @@ SYSTEM = """
 - заборонено брати перші 2–3 рядки та механічно обривати решту матеріалу;
 - заборонено завершувати text незакінченим реченням або фрагментом думки.
 
-ГОЛОВНЕ ПРАВИЛО ОБСЯГУ — КРИТИЧНО ВАЖЛИВО:
-НЕ роби summary, стислий переказ або скорочену версію.
+ГОЛОВНЕ ПРАВИЛО РЕДАКТУРИ — КРИТИЧНО ВАЖЛИВО:
+ПИШИ САМОСТІЙНО, БЕЗ КОПІЮВАННЯ ОРИГІНАЛУ.
 
-- результат повинен максимально зберігати обсяг і весь фактичний зміст оригінального поста;
-- ТВОЄ ЗАВДАННЯ: перекласти українською (якщо потрібно) + лише трохи перефразувати;
-- не викидай абзаци, речення або деталі лише тому, що вони здаються другорядними;
-- не вирішуй самостійно, яку частину матеріалу читачеві «достатньо» знати;
-- кожен змістовний факт оригіналу має залишитися в результаті;
-- зберігай усі змістовні абзаци та логіку матеріалу;
-- дозволено прибрати тільки явні повтори, рекламу, заклики підписатися, footer і назву джерела;
-- НЕ встановлюй штучну ціль на кшталт 80–180 слів;
-- короткий пост -> майже така сама довжина;
-- середній пост -> майже така сама довжина;
-- довгий пост можна лише трохи ущільнити, але без втрати фактів;
-- НІКОЛИ не обрізай матеріал після першого або другого абзацу.
+- не копіюй речення, їх порядок, синтаксис або готові довгі словосполучення;
+- кожен абзац переписуй природною українською новинною мовою;
+- зберігай усі важливі факти, цифри, імена, місця та причинно-наслідкові зв'язки;
+- дозволено і потрібно прибирати дублювання, повтори одного факту та другорядне словесне «розтягування»;
+- НЕ повторюй одну й ту саму інформацію двома-трьома різними формулюваннями;
+- коротка новина має залишатися короткою: не роздувай її заради обсягу;
+- довгу новину можна стисло й чітко структурувати, але без втрати важливих фактів;
+- дозволено об'єднувати кілька речень оригіналу в одне, якщо це не змінює зміст;
+- title повідомляє головний факт, а text містить лише нові деталі;
+- якщо для body немає нових деталей, поверни text як порожній рядок.
 
-Перед відповіддю перевір: чи можна зіставити всі фактичні твердження оригіналу з результатом. Якщо факт зник — результат неправильний.
+Перед відповіддю перевір: читач повинен отримати той самий фактичний зміст, але текст має звучати як самостійно написана новина, а не як копія джерела.
 
 ЗАГОЛОВОК І ОСНОВНИЙ ТЕКСТ — НЕ ПОВТОРЮЮТЬ ОДНЕ ОДНОГО:
 - title коротко повідомляє головний факт;
@@ -405,7 +403,7 @@ def _has_excessive_source_copy(title, text, material, source_title=""):
     title_norm = norm(title)
     if source_headline and len(_normalized_tokens(title)) >= 5:
         headline_norm = norm(source_headline)
-        if fuzz.ratio(title_norm, headline_norm) >= 97:
+        if fuzz.ratio(title_norm, headline_norm) >= 90:
             return True
 
     source_norm = norm(source)
@@ -418,7 +416,7 @@ def _has_excessive_source_copy(title, text, material, source_title=""):
     if len(source_tokens) >= 8 and len(result_tokens) >= 8:
         ratio = fuzz.ratio(source_norm, result_norm)
         token_sort = fuzz.token_sort_ratio(source_norm, result_norm)
-        if ratio >= 94 and token_sort >= 96:
+        if ratio >= 88 and token_sort >= 94:
             return True
 
     # Short factual phrases and names naturally coincide in Ukrainian news.
@@ -426,11 +424,11 @@ def _has_excessive_source_copy(title, text, material, source_title=""):
     # rewrites were repeatedly rejected and the pipeline stopped producing news.
     if len(source_tokens) >= 10 and len(result_tokens) >= 10:
         source_ngrams = {
-            tuple(source_tokens[i:i + 10])
-            for i in range(len(source_tokens) - 9)
+            tuple(source_tokens[i:i + 7])
+            for i in range(len(source_tokens) - 6)
         }
-        for i in range(len(result_tokens) - 9):
-            if tuple(result_tokens[i:i + 10]) in source_ngrams:
+        for i in range(len(result_tokens) - 6):
+            if tuple(result_tokens[i:i + 7]) in source_ngrams:
                 return True
 
     return False
@@ -476,9 +474,9 @@ def _is_near_verbatim_copy(title, text, material):
 
     # No length bypass: short source posts must also be genuinely rewritten.
     return (
-        ratio >= 99
-        or (ratio >= 97 and token_sort >= 99)
-        or (token_ratio >= 100 and token_sort >= 99)
+        ratio >= 94
+        or (ratio >= 91 and token_sort >= 96)
+        or (token_ratio >= 99 and token_sort >= 97)
     )
 
 
@@ -653,12 +651,11 @@ class NewsEditor:
         if _contains_russian_text(title) or _contains_russian_text(text) or _contains_russian_text(event_key):
             raise QualityError("result contains Russian-language text; Ukrainian translation is mandatory")
 
-        # Never delete a paragraph merely because it resembles the headline.
-        # The old code removed the first body paragraph here, which could silently
-        # destroy factual content. The prompt handles stylistic duplication; data
-        # preservation has priority over cosmetic de-duplication.
+        # Title and body must not tell the same fact twice. A repeated headline
+        # is a formatting failure: regenerate the draft instead of publishing a
+        # longer post that says the same thing again in other words.
         if _title_repeated_in_body(title, text):
-            pass
+            raise QualityError("headline is repeated in body")
 
         # A moderation card must contain an actual rewritten news item, not just
         # a copied headline. These thresholds are deliberately calibrated so a
@@ -667,10 +664,9 @@ class NewsEditor:
         if _coverage_too_low(title, text, material):
             raise QualityError("draft lost too much factual coverage")
 
-        # The user explicitly wants a full translation with only LIGHT paraphrasing.
-        # Do not reject a factually correct draft merely because some headline or
-        # wording remains close to the original; similarity is expected for names,
-        # numbers, short factual posts and already-Ukrainian source material.
+        # The user explicitly requires an independently written post. Names,
+        # numbers and unavoidable factual terms may coincide, but copied sentence
+        # structure or long verbatim runs are not acceptable.
 
         plain_result = _plain(text)
         # Do not truncate a valid complete rewrite simply because it is somewhat
@@ -709,17 +705,16 @@ class NewsEditor:
         return SYSTEM + """
 
 ДОДАТКОВИЙ КОНТРОЛЬ ЯКОСТІ:
-- Якщо оригінал уже українською, роби лише легке редакторське перефразування без скорочення змісту.
-- Дозволене ЛЕГКЕ перефразування. Не переписуй матеріал радикально і не роби summary.
-- Зберігай природні формулювання, імена, цифри та факти; змінюй лише те, що потрібно для чистої української новинної подачі.
-- Перед формуванням JSON прочитай весь матеріал і перевір зміст кожного абзацу.
-- Не залишай лише перший абзац, якщо далі є нові факти.
-- Якщо оригінал містить кілька змістовних абзаців, результат повинен передати
-  зміст усіх таких абзаців, навіть якщо їх доведеться об'єднати.
-- Кожне речення у відповіді має бути завершеним.
-- Для короткого/середнього поста зберігай майже весь обсяг і весь фактичний зміст; НЕ стискай його до 2–3 рядків.
-- Це режим ПОВНОГО ПЕРЕКЛАДУ З ЛЕГКИМ ПЕРЕФРАЗУВАННЯМ, а не режим summary.
-- Якщо title вже містить головний факт, у text залишай решту важливих деталей.
+- Пиши кожну новину СВОЇМИ СЛОВАМИ. Оригінал — це джерело фактів, а не шаблон для копіювання.
+- Якщо оригінал уже українською, все одно перебудовуй речення та синтаксис, а не міняй 1–2 слова.
+- Не дублюй факти між title і text і не повторюй один факт кількома формулюваннями.
+- Перед формуванням JSON прочитай весь матеріал і перевір кожен важливий факт.
+- Не губи нові факти з наступних абзаців, але прибирай справжні повтори.
+- Кожне речення має бути завершеним і природним.
+- Короткі новини не роздувай: один чіткий заголовок і лише потрібні нові деталі.
+- Довгі новини стискай лише за рахунок повторів і словесної надмірності, а не фактів.
+- Якщо title вже містить головний факт, у text залишай тільки нові деталі.
+- Перевір фінальний текст на копіювання: він не повинен відтворювати оригінальні речення або їх порядок.
 """
 
     async def edit(self, news):
@@ -749,9 +744,9 @@ class NewsEditor:
 
 ЗРОБИ НОВУ САМОСТІЙНУ ВЕРСІЮ З НУЛЯ ЗА ОРИГІНАЛЬНИМ МАТЕРІАЛОМ.
 Не виправляй старий текст механічно. Особливо важливо:
-- зроби повний текст природним українським новинним стилем, але не скорочуй його;
-- легке зближення формулювань з оригіналом допустиме, якщо факти передані точно;
-- не губи змістовні абзаци й ключові факти;
+- напиши текст заново своїми словами природним українським новинним стилем;
+- не копіюй речення, порядок речень або довгі словосполучення з оригіналу;
+- не губи ключові факти, але прибери реальні повтори та словесну надмірність;
 - title і text не повинні дублювати один одного;
 - не повертай обірвані речення;
 - не додавай жодних нових фактів.
