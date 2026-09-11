@@ -124,30 +124,19 @@ class NewsPipeline:
             self.db.cleanup_history(self.settings.history_retention_days)
             self._last_cleanup = now
 
-        # Do not keep spending AI calls after enough *fresh* news already
-        # exist to fill today's publication target. Historical moderation cards
-        # must never freeze the pipeline: only cards created within the same
-        # freshness window as the live queue affect current capacity.
+        # The publication target is based ONLY on successfully published news.
+        # Pending moderation cards, rejected cards and in-memory queue items are
+        # deliberately excluded: they must never consume or block the user's
+        # daily publication quota.
         published_today = self.db.daily_count("published_news")
-        pending_moderation = self.db.pending_count(
-            max_age_minutes=MAX_QUEUE_AGE_MINUTES
-        )
-        queued_ready = len(self.queue)
-        remaining_target = (
-            self.settings.max_published_news_per_day
-            - published_today
-            - pending_moderation
-            - queued_ready
-        )
-        if remaining_target <= 0:
+        if published_today >= self.settings.max_published_news_per_day:
             log.info(
-                "Publication target capacity is full | published=%s pending=%s queued=%s target=%s",
+                "Published-news target reached | published=%s target=%s",
                 published_today,
-                pending_moderation,
-                queued_ready,
                 self.settings.max_published_news_per_day,
             )
             return
+        remaining_target = self.settings.max_published_news_per_day - published_today
 
         items = await collect_news(self.settings)
 
@@ -184,15 +173,15 @@ class NewsPipeline:
                 continue
 
             # A restart or a sudden source backlog must not burn the entire API
-            # balance in a single minute. Remaining fresh items are retried on
-            # the next cycle and are still protected by their age limit.
-            # Never prepare more items than can still fit the publication
-            # target, even if the daily AI safety budget is much larger.
-            if ai_attempts >= min(self.settings.max_ai_candidates_per_cycle, remaining_target):
+            # balance in a single minute. The publication target is enforced
+            # only on successful publication, so moderation cards themselves do
+            # not reduce the number of candidates that may be prepared.
+            if ai_attempts >= self.settings.max_ai_candidates_per_cycle:
                 log.info(
-                    "AI cycle/target capacity reached (%s candidates this cycle; %s target slots remain)",
+                    "AI cycle safety cap reached (%s candidates this cycle; published=%s/%s)",
                     self.settings.max_ai_candidates_per_cycle,
-                    remaining_target,
+                    published_today,
+                    self.settings.max_published_news_per_day,
                 )
                 break
 
@@ -208,9 +197,8 @@ class NewsPipeline:
                 # candidate may now download its original media.
                 await materialize_news(raw)
 
-                # Some RSS feeds omit publication dates. If the article page
-                # reveals an old publication time, stop here before spending an
-                # OpenAI request.
+                # A source item may reveal an older publication time after
+                # media materialization; stop here before spending an OpenAI request.
                 if _is_too_old(raw.published_at):
                     self.db.set_status(raw.url, "stale")
                     _cleanup_media(raw.media_path, raw.media_paths)
