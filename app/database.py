@@ -165,6 +165,22 @@ class Database:
         )
         self.conn.commit()
 
+    def reopen_recent_quality_rejections(self, hours=6):
+        """One-time recovery path after a quality-gate deployment fix.
+
+        Reopen only recent terminal quality rejects. If they still fail under the
+        current rules, the pipeline will mark them terminal again, so this does
+        not create an endless retry loop during normal operation.
+        """
+        since = (datetime.now(timezone.utc) - timedelta(hours=max(1, int(hours)))).isoformat()
+        cur = self.conn.execute(
+            "UPDATE news SET status='quality_rejected' "
+            "WHERE status='quality_rejected_final' AND created_at >= ?",
+            (since,),
+        )
+        self.conn.commit()
+        return int(cur.rowcount or 0)
+
     def get_status(self, url):
         row = self.conn.execute(
             "SELECT status FROM news WHERE url=? LIMIT 1", (url,)
