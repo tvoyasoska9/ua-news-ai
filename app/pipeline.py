@@ -83,9 +83,6 @@ class NewsPipeline:
         self.queue_events = []
         self._last_cleanup = datetime.min.replace(tzinfo=timezone.utc)
 
-    def _prepared_news_limit_reached(self):
-        return self.db.daily_count("prepared_news") >= self.settings.max_prepared_news_per_day
-
     def _consume_model_slot(self):
         return self.db.try_consume_daily("model_calls", self.settings.max_model_calls_per_day)
 
@@ -132,16 +129,6 @@ class NewsPipeline:
         # collect_news() is Telegram-only. Preserve the collector's strict
         # round-robin order across configured channels.
         log.info("Collected %s Telegram candidates from configured channels", len(items))
-
-        if self._prepared_news_limit_reached():
-            log.info(
-                "Daily prepared-news limit reached before processing | prepared_news: %s/%s | model_calls: %s/%s",
-                self.db.daily_count("prepared_news"),
-                self.settings.max_prepared_news_per_day,
-                self.db.daily_count("model_calls"),
-                self.settings.max_model_calls_per_day,
-            )
-            return
 
         # Cheap duplicate screening happens before OpenAI. Keep titles seen in
         # this very cycle as well, otherwise five channels can spend five AI
@@ -264,9 +251,9 @@ class NewsPipeline:
 
         log.info("Moderation queue size: %s", len(self.queue))
         log.info(
-            "Daily usage | prepared_news: %s/%s | model_calls: %s/%s",
-            self.db.daily_count("prepared_news"),
-            self.settings.max_prepared_news_per_day,
+            "Daily usage | published_news: %s/%s | model_calls: %s/%s",
+            self.db.daily_count("published_news"),
+            self.settings.max_published_news_per_day,
             self.db.daily_count("model_calls"),
             self.settings.max_model_calls_per_day,
         )
@@ -291,14 +278,6 @@ class NewsPipeline:
             except ValueError:
                 pass
 
-            if not self.db.try_consume_daily(
-                "prepared_news", self.settings.max_prepared_news_per_day
-            ):
-                self.db.set_status(url, "daily_limit")
-                _cleanup_media(media_path, media_paths)
-                log.info("Daily prepared-news limit reached (%s)", self.settings.max_prepared_news_per_day)
-                continue
-
             try:
                 await self.bot.send_for_moderation(
                     edited,
@@ -319,7 +298,6 @@ class NewsPipeline:
                 )
                 await asyncio.sleep(self.settings.moderation_interval_seconds)
             except Exception:
-                self.db.release_daily("prepared_news")
                 log.exception("Failed to send queued news for moderation")
                 self.db.set_status(url, "error")
                 await asyncio.sleep(5)
