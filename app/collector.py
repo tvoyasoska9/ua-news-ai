@@ -88,6 +88,35 @@ def _title_from_blocks(blocks):
             return re.sub(r"\s+", " ", block["text"]).strip()[:300]
     return re.sub(r"\s+", " ", blocks[0]["text"]).strip()[:300] if blocks else ""
 
+def _media_suffix(message, kind):
+    if kind == "photo":
+        return ".jpg"
+
+    # Do not blindly rename every source video to .mp4. Telegram channels can
+    # contain video documents with another real container/extension; forcing an
+    # MP4 suffix can make downstream upload/inspection mis-detect the media.
+    name = ""
+    try:
+        name = str(getattr(getattr(message, "file", None), "name", "") or "")
+    except Exception:
+        pass
+    suffix = Path(name).suffix.lower()
+    if suffix in {".mp4", ".mov", ".mkv", ".webm", ".m4v", ".avi"}:
+        return suffix
+
+    mime = ""
+    try:
+        mime = str(getattr(getattr(message, "document", None), "mime_type", "") or "").lower()
+    except Exception:
+        pass
+    return {
+        "video/mp4": ".mp4",
+        "video/quicktime": ".mov",
+        "video/webm": ".webm",
+        "video/x-matroska": ".mkv",
+        "video/x-msvideo": ".avi",
+    }.get(mime, ".mp4")
+
 async def fetch_telegram_source(client, source):
     # Strict rolling window: only source posts published within the last
     # 60 minutes from the actual moment of collection are eligible.
@@ -175,7 +204,7 @@ async def materialize_news(news):
     paths, types = [], []
     for index, message in enumerate(news.media_messages, start=1):
         kind = "photo" if message.photo else "video"
-        suffix = ".jpg" if kind == "photo" else ".mp4"
+        suffix = _media_suffix(message, kind)
         target = media_dir / f"{username}_{message.id}_{index}{suffix}"
         try:
             result = await client.download_media(message, file=str(target))
