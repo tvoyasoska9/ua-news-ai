@@ -1,0 +1,493 @@
+import asyncio
+import json
+import re
+from html import escape as html_escape
+from html.parser import HTMLParser
+
+from openai import AsyncOpenAI, APIConnectionError, APITimeoutError, InternalServerError, RateLimitError
+from rapidfuzz import fuzz
+
+from app.models import EditedNews
+
+
+SYSTEM = """
+Ти — редактор українського новинного Telegram-каналу.
+
+Твоя задача: перекласти матеріал українською та унікально переформулювати його.
+
+СПОЧАТКУ ПРОАНАЛІЗУЙ ЗМІСТ, А НЕ ОФОРМЛЕННЯ:
+- прочитай ВЕСЬ матеріал від початку до кінця;
+- визнач факти, твердження, причини, наслідки, оцінки спікерів і висновки;
+- не вирішуй, що є «головним», лише за першим реченням, емодзі, жирним шрифтом,
+  довжиною абзацу, розділовими знаками або позицією тексту;
+- кожен змістовний абзац перевір окремо: якщо він додає новий факт, цей факт має
+  залишитися в результаті;
+- заборонено брати перші 2–3 рядки та механічно обривати решту матеріалу;
+- заборонено завершувати text незакінченим реченням або фрагментом думки.
+
+ГОЛОВНЕ ПРАВИЛО ОБСЯГУ:
+Пиши стислий Telegram-пост, а не повний переклад статті.
+
+- збережи всі ключові факти, необхідні для розуміння новини;
+- прибирай повтори, другорядні деталі та редакційний шум;
+- не додавай нові факти, пояснення або контекст;
+- коротке джерело -> короткий результат;
+- довгу статтю стискай до суті без втрати головних фактів;
+- зазвичай достатньо приблизно 80–180 слів;
+- не роздувай текст лише для того, щоб повторити обсяг оригіналу;
+- але НІКОЛИ не скорочуй короткий або середній Telegram-пост настільки, щоб
+  зникли окремі фактичні абзаци, ключові ризики, причини чи висновки автора;
+- якщо оригінал уже короткий/середній, збережи практично весь його фактичний
+  зміст і всі змістовні абзаци, а не лише перше речення.
+
+ЗАГОЛОВОК І ОСНОВНИЙ ТЕКСТ — НЕ ПОВТОРЮЮТЬ ОДНЕ ОДНОГО:
+- title коротко повідомляє головний факт;
+- text одразу дає НОВІ деталі, яких ще немає в title;
+- категорично не переписуй title ще раз у першому реченні text іншими словами;
+- не дублюй один і той самий факт у title і text;
+- якщо в короткому оригіналі немає окремих деталей, достатніх для text без повтору,
+  дозволено повернути порожній text: "".
+- краще короткий пост без повтору, ніж штучно роздутий текст із дублюванням.
+
+ФОРМАТУВАННЯ:
+У полі text дозволений тільки безпечний Telegram HTML:
+<b>...</b>, <i>...</i>, <u>...</u>, <s>...</s>, <blockquote>...</blockquote>.
+Якщо в оригінальному повідомленні є виділення, зберігай його логіку:
+важливі виділені фрагменти повинні залишатися виділеними, а звичайний текст —
+звичайним. Не роби весь текст жирним лише тому, що частина була виділена.
+НЕ копіюй речення, їх порядок або синтаксис механічно. Побудуй результат як
+самостійно написану новину: факти залишаються ті самі, але формулювання та
+побудова речень мають бути власними. Зберігай виділення лише там, де це справді
+допомагає читабельності; не відтворюй структуру оригіналу автоматично.
+
+ДЖЕРЕЛА ТА ПРОМО БЛОКИ — АБСОЛЮТНЕ ТАБУ В ГОТОВІЙ НОВИНІ:
+У title і text категорично заборонено згадувати назву каналу/сайту, @username,
+t.me, Telegram-канал як джерело, посилання на оригінал, слова «Джерело»,
+«Источник», «Source» разом із походженням інформації.
+Також категорично заборонені будь-які рекламні або підписні вставки з оригіналу:
+«Підписатись», «Підписатися», «Подписаться», «Subscribe», назва чужого каналу
+разом із закликом підписатися, кнопки, слогани та footer-підписи чужих каналів.
+Не розкривай походження матеріалу і не перенось у результат чужий промо/footer
+ні в якому вигляді.
+
+ВИКОРИСТОВУЙ ЛИШЕ ФАКТИ З НАДАНОГО МАТЕРІАЛУ.
+Нічого не вигадуй і не додавай власних оцінок.
+
+EVENT_KEY:
+Створи короткий нейтральний стабільний ключ події (5–12 слів).
+Він має описувати саме фактичну подію за схемою:
+ЩО СТАЛОСЯ + ДЕ/З КИМ + головний об'єкт.
+Не використовуй емоційні формулювання, заклики або редакційні слова.
+Для різних постів про ту саму подію event_key повинен бути максимально схожим,
+щоб система не надсилала дублікати.
+
+Оціни importance від 1 до 10:
+1-2 — дрібне;
+3-5 — звичайна новина;
+6-8 — значуща;
+9-10 — велика подія.
+
+РЕЖИМ ШИРОКОГО ОХОПЛЕННЯ:
+Не відсіюй реальні новини лише через невеликий масштаб, але не створюй повтор
+про те саме фактичне повідомлення іншими словами.
+
+Поверни ТІЛЬКИ валідний JSON:
+{"title":"...","text":"HTML-текст або порожній рядок","event_key":"...","category":"Україна|Війна|Політика|Європа|Світ|Економіка|Інше","importance":1,"confidence":"low|medium|high"}
+"""
+
+SOURCE_LABEL_RE = re.compile(
+    r"(?is)\b(?:джерело|источник|source)\b\s*[:—–-]\s*[^.!?\n]*(?:[.!?]|$)"
+)
+TELEGRAM_SOURCE_RE = re.compile(
+    r"(?is)\b(?:telegram|телеграм)[\s-]*(?:канал|channel)?\s*@?[A-Za-z0-9_]+\b"
+)
+TELEGRAM_URL_RE = re.compile(
+    r"(?i)(?:https?://)?(?:www\.)?(?:t\.me|telegram\.me)/[A-Za-z0-9_./?=&%-]+"
+)
+MENTION_RE = re.compile(r"(?<!\w)@[A-Za-z0-9_]{3,}\b")
+PROMO_CTA_RE = re.compile(
+    r"(?i)(?:"
+    r"підписатись|підписатися|підписуйся(?:\s+на\s+[^\n|•]{1,60})?|"
+    r"подписаться(?:\s+на\s+канал)?|subscribe(?:\s+now)?|"
+    r"надіслати\s+новину|прислать\s+новость|send\s+news"
+    r")"
+)
+GENERIC_TITLES = {"новина", "news", "новости", "повідомлення", "повідомлення дня"}
+
+
+def _source_aliases(source):
+    aliases = set()
+    source = (source or "").strip()
+    if source:
+        aliases.add(source)
+        if source.lower().startswith("telegram:"):
+            rest = source.split(":", 1)[1].strip()
+            aliases.add(rest)
+            aliases.add(rest.lstrip("@"))
+    return {x for x in aliases if x}
+
+
+def _strip_promo_footer(text):
+    lines = str(text or "").splitlines()
+    while lines and not lines[-1].strip():
+        lines.pop()
+    if not lines:
+        return ""
+
+    last = lines[-1].strip()
+    matches = list(PROMO_CTA_RE.finditer(last))
+    if not matches:
+        return "\n".join(lines)
+
+    match = matches[-1]
+    tail = re.sub(r"</?[^>]+>", "", last[match.end():]).strip(" \t.!…‼️❗️")
+    if tail:
+        return "\n".join(lines)
+
+    before = last[:match.start()].rstrip()
+
+    if before.endswith(("|", "•")):
+        label = before[:-1].strip()
+        if label and len(label) <= 100 and not re.search(r"[.!?…]", label):
+            lines.pop()
+            return "\n".join(lines).rstrip()
+
+    boundary = max(before.rfind(mark) for mark in ".!?…")
+    if boundary >= 0:
+        lines[-1] = before[:boundary + 1].rstrip()
+        return "\n".join(lines).rstrip()
+
+    lines[-1] = before.rstrip(" |•—–-")
+    return "\n".join(lines).rstrip()
+
+
+def strip_source_mentions(value, source=""):
+    text = str(value or "").strip()
+    if not text:
+        return ""
+
+    text = TELEGRAM_URL_RE.sub(" ", text)
+    text = SOURCE_LABEL_RE.sub(" ", text)
+    text = TELEGRAM_SOURCE_RE.sub(" ", text)
+    text = MENTION_RE.sub(" ", text)
+    for alias in sorted(_source_aliases(source), key=len, reverse=True):
+        text = re.sub(re.escape(alias), " ", text, flags=re.IGNORECASE)
+
+    text = re.sub(
+        r"(?i)\b(?:за даними|повідомляє|повідомив|зазначає)\s+(?:телеграм[-\s]?канал|канал)\b",
+        " ",
+        text,
+    )
+    text = _strip_promo_footer(text)
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r" *\n *", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = re.sub(r"\s+([,.;:!?])", r"\1", text)
+    return text.strip(" \n—–-:;,|•")
+
+
+_ALLOWED_TAGS = {"b", "strong", "i", "em", "u", "s", "strike", "blockquote", "code", "pre"}
+
+
+class _SafeHTML(HTMLParser):
+    def __init__(self, source=""):
+        super().__init__(convert_charrefs=True)
+        self.parts = []
+        self.source = source
+        self.stack = []
+
+    def handle_starttag(self, tag, attrs):
+        tag = tag.lower()
+        if tag in _ALLOWED_TAGS:
+            normalized = {"strong": "b", "em": "i", "strike": "s"}.get(tag, tag)
+            self.parts.append(f"<{normalized}>")
+            self.stack.append(normalized)
+
+    def handle_endtag(self, tag):
+        tag = {"strong": "b", "em": "i", "strike": "s"}.get(tag.lower(), tag.lower())
+        if tag in self.stack:
+            while self.stack:
+                current = self.stack.pop()
+                self.parts.append(f"</{current}>")
+                if current == tag:
+                    break
+
+    def handle_data(self, data):
+        if data:
+            self.parts.append(html_escape(data, quote=False))
+
+    def get_html(self):
+        while self.stack:
+            self.parts.append(f"</{self.stack.pop()}>")
+        result = "".join(self.parts)
+        result = re.sub(r"[ \t]+\n", "\n", result)
+        result = re.sub(r"\n[ \t]+", "\n", result)
+        result = re.sub(r"\n{3,}", "\n\n", result)
+        return result.strip()
+
+
+def sanitize_news_html(value, source=""):
+    cleaned = strip_source_mentions(str(value or ""), source)
+    parser = _SafeHTML()
+    parser.feed(cleaned)
+    parser.close()
+    return strip_source_mentions(parser.get_html(), source)
+
+
+def _plain(value):
+    value = re.sub(r"<[^>]+>", " ", str(value or ""))
+    value = re.sub(r"\s+", " ", value)
+    return value.strip()
+
+
+def _first_paragraph(value):
+    parts = re.split(r"\n\s*\n+", _plain(value))
+    return next((part.strip() for part in parts if part.strip()), "")
+
+
+def _fallback_title_from_material(value):
+    text = strip_source_mentions(_plain(value))
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        return ""
+    match = re.search(r"^(.{1,260}?[.!?…])(?:\s|$)", text)
+    if match:
+        return match.group(1).strip()
+    return text[:220].rstrip(" ,;:—–-")
+
+
+def _is_usable_title(value):
+    plain = _plain(value).strip()
+    normalized = re.sub(r"\s+", " ", plain.lower()).strip(" .!?:;—–-")
+    return len(plain) >= 12 and normalized not in GENERIC_TITLES
+
+
+def _word_count(value):
+    return len(re.findall(r"(?u)\b[\w’'-]+\b", _plain(value)))
+
+
+def _meaningful_paragraphs(value):
+    return [
+        _plain(part).strip()
+        for part in re.split(r"\n\s*\n+", str(value or ""))
+        if len(_plain(part).strip()) >= 20
+    ]
+
+
+def _coverage_too_low(title, text, material):
+    """Reject only catastrophic truncation, not normal semantic compression."""
+    original_words = _word_count(material)
+    if original_words < 70:
+        return False
+
+    result_words = _word_count(title) + _word_count(text)
+    source_paragraphs = _meaningful_paragraphs(material)
+
+    # Word count is not factual coverage. A concise but complete rewrite is valid.
+    if result_words < max(24, int(original_words * 0.18)):
+        return True
+
+    # Paragraph merging is allowed. Flag only a genuinely tiny result from a
+    # clearly long multi-paragraph source.
+    if len(source_paragraphs) >= 5 and _word_count(text) < 35:
+        return True
+
+    return False
+
+
+def _material_coverage_too_low(title, text, material):
+    return _coverage_too_low(title, text, material)
+
+
+def _is_near_verbatim_copy(title, text, material):
+    source = re.sub(r"\s+", " ", _plain(material)).strip().lower()
+    result = re.sub(r"\s+", " ", _plain(f"{title}\n{text}")).strip().lower()
+    if _word_count(source) < 70 or _word_count(result) < 50:
+        return False
+    ratio = fuzz.ratio(source, result)
+    token_ratio = fuzz.token_set_ratio(source, result)
+    return ratio >= 88 and token_ratio >= 96
+
+
+def _title_repeated_in_body(title, body):
+    title_plain = _plain(title)
+    first = _first_paragraph(body)
+    if len(title_plain) < 18 or len(first) < 18:
+        return False
+
+    title_norm = re.sub(r"[^\w\s]", " ", title_plain.lower())
+    first_norm = re.sub(r"[^\w\s]", " ", first.lower())
+    title_norm = re.sub(r"\s+", " ", title_norm).strip()
+    first_norm = re.sub(r"\s+", " ", first_norm).strip()
+
+    if not title_norm or not first_norm:
+        return False
+
+    if title_norm in first_norm and len(first_norm) <= max(len(title_norm) * 2.4, len(title_norm) + 70):
+        return True
+
+    token_set = fuzz.token_set_ratio(title_norm, first_norm)
+    token_sort = fuzz.token_sort_ratio(title_norm, first_norm)
+    return token_set >= 92 and token_sort >= 72 and len(first_norm) <= len(title_norm) * 2.5
+
+
+def _trim_to_sentence_boundary(value, limit):
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    boundary = max(text.rfind(mark, 0, limit + 1) for mark in ".!?…")
+    if boundary >= max(40, int(limit * 0.45)):
+        return text[:boundary + 1].rstrip()
+    grace_end = min(len(text), limit + 240)
+    candidates = [text.find(mark, limit, grace_end) for mark in ".!?…"]
+    candidates = [pos for pos in candidates if pos != -1]
+    if candidates:
+        return text[:min(candidates) + 1].rstrip()
+    return text
+
+
+def _finish_at_sentence_boundary(value):
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if text[-1] in ".!?…»”)]}":
+        return text
+    boundary = max(text.rfind(mark) for mark in ".!?…")
+    if boundary >= max(40, int(len(text) * 0.45)):
+        return text[:boundary + 1].rstrip()
+    return ""
+
+
+class NewsEditor:
+    """One API call per unique candidate."""
+
+    def __init__(
+        self,
+        api_key,
+        model,
+        max_material_chars=7000,
+        max_completion_tokens=1100,
+        max_retries=2,
+    ):
+        self.client = AsyncOpenAI(api_key=api_key)
+        self.model = model
+        self.max_material_chars = max(1500, min(int(max_material_chars), 6000))
+        self.max_completion_tokens = max(400, min(int(max_completion_tokens), 1600))
+        self.max_retries = max(0, min(int(max_retries), 3))
+
+    async def _request(self, messages, max_completion_tokens=None):
+        transient = (APIConnectionError, APITimeoutError, InternalServerError, RateLimitError)
+        for attempt in range(self.max_retries + 1):
+            try:
+                return await self.client.chat.completions.create(
+                    model=self.model,
+                    response_format={"type": "json_object"},
+                    max_completion_tokens=max_completion_tokens or self.max_completion_tokens,
+                    messages=messages,
+                )
+            except transient:
+                if attempt >= self.max_retries:
+                    raise
+                await asyncio.sleep(min(8, 1.5 * (2 ** attempt)))
+
+    async def edit(self, news):
+        raw_input = str(news.summary or news.title or "")
+        raw_material = strip_source_mentions(raw_input, news.source)
+        material = _trim_to_sentence_boundary(raw_material, self.max_material_chars)
+        original_plain = _plain(material)
+        original_len = len(original_plain)
+        if not material or not original_plain:
+            raise ValueError("Candidate lost all factual text during source cleanup")
+
+        original_words = _word_count(material)
+        completion_budget = min(
+            self.max_completion_tokens,
+            max(500, min(1500, int(original_words * 2.2) + 180)),
+        )
+
+        system = SYSTEM + """
+
+ДОДАТКОВИЙ КОНТРОЛЬ ЯКОСТІ:
+- Перед формуванням JSON прочитай весь матеріал і перевір зміст кожного абзацу.
+- Відбирай факти за змістом, а не за емодзі, жирним шрифтом, першою позицією,
+  довжиною рядка чи іншими візуальними ознаками.
+- Не залишай лише перший абзац, якщо далі є нові факти.
+- Якщо оригінал містить кілька змістовних абзаців, результат повинен передати
+  зміст усіх таких абзаців, навіть якщо їх доведеться об'єднати.
+- Кожне речення у відповіді має бути завершеним.
+- Для короткого/середнього поста не стискай текст механічно до 2–3 рядків.
+- Якщо title вже містить головний факт, у text залишай решту важливих деталей.
+- Поверни готовий результат з першої спроби.
+"""
+
+        response = await self._request([
+            {"role": "system", "content": system},
+            {
+                "role": "user",
+                "content": (
+                    "Внутрішні метадані для перевірки фактів. "
+                    "НЕ включай джерело, username або посилання в результат.\n"
+                    f"Заголовок матеріалу: {news.title}\n"
+                    f"Дата публікації: {news.published_at or 'невідомо'}\n"
+                    f"Оригінальний матеріал ({original_len} символів без HTML):\n{material}"
+                ),
+            },
+        ], max_completion_tokens=completion_budget)
+
+        data = json.loads(response.choices[0].message.content or "{}")
+        title = strip_source_mentions(data.get("title") or "", news.source)
+        if not _is_usable_title(title):
+            title = _fallback_title_from_material(material)
+        if not _is_usable_title(title):
+            title = _fallback_title_from_material(news.title)
+        if not _is_usable_title(title):
+            raise ValueError("AI returned no usable factual title")
+
+        text = sanitize_news_html(data.get("text") or "", news.source)
+        text = sanitize_news_html(_finish_at_sentence_boundary(text), news.source)
+        event_key = strip_source_mentions(data.get("event_key") or title or news.title, news.source)
+
+        if _title_repeated_in_body(title, text):
+            paragraphs = [part.strip() for part in re.split(r"\n\s*\n+", text) if part.strip()]
+            if paragraphs:
+                paragraphs = paragraphs[1:]
+            text = "\n\n".join(paragraphs).strip()
+
+        # One paid AI call only. Reject only genuine catastrophic truncation,
+        # not normal concise semantic rewriting.
+        if _material_coverage_too_low(title, text, material):
+            raise ValueError("AI output catastrophically truncated the material")
+
+        if _is_near_verbatim_copy(title, text, material):
+            raise ValueError("AI output is too close to the original wording")
+
+        plain_result = _plain(text)
+        if original_len >= 120 and len(plain_result) > int(original_len * 1.35) + 80:
+            limit = int(original_len * 1.25) + 60
+            plain_text = _plain(text)
+            boundaries = [plain_text.rfind(mark, 0, limit + 1) for mark in ".!?…"]
+            boundary = max(boundaries)
+            if boundary >= max(40, int(limit * 0.45)):
+                text = plain_text[:boundary + 1].strip()
+            else:
+                grace_end = min(len(plain_text), limit + 180)
+                candidates = [plain_text.find(mark, limit, grace_end) for mark in ".!?…"]
+                candidates = [pos for pos in candidates if pos != -1]
+                if candidates:
+                    text = plain_text[:min(candidates) + 1].strip()
+            text = sanitize_news_html(text, news.source)
+
+        importance = max(1, min(10, int(data.get("importance", 1))))
+        confidence = str(data.get("confidence") or "medium").strip().lower()
+        if confidence not in {"low", "medium", "high"}:
+            confidence = "medium"
+
+        return EditedNews(
+            title=title,
+            text=text,
+            category=str(data.get("category") or "Інше").strip(),
+            importance=importance,
+            confidence=confidence,
+            source_urls=[],
+            event_key=event_key or title or news.title,
+        )
