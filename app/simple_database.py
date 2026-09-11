@@ -76,8 +76,19 @@ class SimpleDatabase:
         row = self.conn.execute(
             "SELECT title,text,url,media FROM simple_pending WHERE item_id=?", (item_id,)
         ).fetchone()
-        return None if not row else {
-            "title": row[0], "text": row[1], "url": row[2], "media": json.loads(row[3]),
+        if not row:
+            return None
+        media = json.loads(row[3])
+        # Old pending cards stored only cached Bot API file_ids as a list.
+        # New cards also retain the untouched local source files.
+        if isinstance(media, list):
+            media = {"cached": media, "local": []}
+        if not isinstance(media, dict):
+            media = {"cached": [], "local": []}
+        media.setdefault("cached", [])
+        media.setdefault("local", [])
+        return {
+            "title": row[0], "text": row[1], "url": row[2], "media": media,
         }
 
     def delete_pending(self, item_id):
