@@ -292,18 +292,27 @@ class NewsPipeline:
                         edited = await self.editor.repair(raw, reason)
                         self.db.record_metric(raw.url, raw.source, "model_completed")
                     except QualityError as repair_error:
-                        # Availability takes priority over stylistic rejection:
-                        # keep processing subsequent candidates without stopping
-                        # the monitoring loop.
-                        self.db.set_status(raw.url, "quality_rejected_final")
+                        # FINAL AVAILABILITY FALLBACK: moderation is human-controlled.
+                        # Never silently discard a collected news item merely because
+                        # an automated editor validation rejected its formatting.
+                        from app.models import EditedNews
+                        fallback_text = (raw.summary or raw.title or "").strip()
+                        fallback_title = (raw.title or fallback_text[:140] or "Новина").strip()
+                        edited = EditedNews(
+                            title=fallback_title[:180],
+                            text=fallback_text,
+                            category="news",
+                            importance=max(1, self.settings.min_importance_to_send),
+                            confidence="fallback",
+                            source_urls=[raw.url],
+                            event_key=raw.url,
+                        )
                         log.warning(
-                            "Draft rejected after repair; continuing pipeline | source=%s | title=%s | reason=%s",
+                            "Editor validation failed; sending availability fallback to moderation | source=%s | title=%s | reason=%s",
                             raw.source,
                             raw.title[:100],
                             str(repair_error),
                         )
-                        _cleanup_media(raw.media_path, raw.media_paths)
-                        continue
                     except Exception:
                         log.exception("AI repair failed")
                         self.db.release_daily("model_calls")
