@@ -304,15 +304,18 @@ def _has_excessive_source_copy(title, text, material, source_title=""):
         headline_tokens = fuzz.token_set_ratio(
             _plain(title).lower(), source_headline.lower()
         )
-        if headline_ratio >= 90 or headline_tokens >= 96:
+        if headline_ratio >= 96 and headline_tokens >= 98:
             return True
 
     source_norm = re.sub(r"\s+", " ", source.lower()).strip()
     result_norm = re.sub(r"\s+", " ", result.lower()).strip()
-    if len(_normalized_tokens(result)) >= 12:
+    # token_set_ratio can report 100 when one text is largely a subset of the
+    # other, which is common in a legitimate concise rewrite. Use strong
+    # sequence similarity here and keep the separate verbatim-fragment check
+    # below for actual copied wording.
+    if len(_normalized_tokens(result)) >= 20 and len(_normalized_tokens(source)) >= 20:
         ratio = fuzz.ratio(source_norm, result_norm)
-        token_ratio = fuzz.token_set_ratio(source_norm, result_norm)
-        if ratio >= 80 and token_ratio >= 88:
+        if ratio >= 90:
             return True
 
     # Reject any long verbatim fragment copied from the source.
@@ -320,11 +323,11 @@ def _has_excessive_source_copy(title, text, material, source_title=""):
     source_tokens = _normalized_tokens(source)
     if len(result_tokens) >= 14 and len(source_tokens) >= 14:
         source_ngrams = {
-            tuple(source_tokens[i:i+10])
-            for i in range(len(source_tokens) - 9)
+            tuple(source_tokens[i:i+14])
+            for i in range(len(source_tokens) - 13)
         }
-        for i in range(len(result_tokens) - 9):
-            if tuple(result_tokens[i:i+10]) in source_ngrams:
+        for i in range(len(result_tokens) - 13):
+            if tuple(result_tokens[i:i+14]) in source_ngrams:
                 return True
 
     return False
