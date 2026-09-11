@@ -119,7 +119,7 @@ class Database:
         Transient/API failures and deterministic quality failures are retryable;
         otherwise one bad model response would permanently erase a real news item.
         """
-        retryable = {"error", "error_retry", "quality_failed_retry", "quality_retry_pending", "processing", "daily_model_limit"}
+        retryable = {"error", "error_retry", "processing", "daily_model_limit"}
         if fingerprint:
             rows = self.conn.execute(
                 "SELECT url,status FROM news WHERE url=? OR fingerprint=?",
@@ -198,7 +198,7 @@ class Database:
         # Retryable candidates must not poison title deduplication. Otherwise a
         # failed candidate is loaded on restart and immediately matches its own
         # historical title, so it can never reach the retry path.
-        retryable = ("error_retry", "quality_failed_retry", "quality_retry_pending", "processing")
+        retryable = ("error_retry", "processing")
         placeholders = ",".join("?" for _ in retryable)
         rows = self.conn.execute(
             f"SELECT title FROM news "
