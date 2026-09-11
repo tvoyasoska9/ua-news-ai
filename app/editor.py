@@ -140,7 +140,7 @@ def _contains_russian_text(value):
         return False
     if RUSSIAN_EXCLUSIVE_RE.search(plain):
         return True
-    tokens = set(re.findall(r"(?u)\\b[а-яіїєґёыэъ'-]+\\b", plain))
+    tokens = set(re.findall(r"(?u)\b[а-яіїєґёыэъ'-]+\\b", plain))
     return bool(tokens & RUSSIAN_MARKERS)
 
 
