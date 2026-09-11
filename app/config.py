@@ -12,27 +12,6 @@ def required(name):
     return value
 
 
-def bounded_int(name, default, minimum, maximum):
-    try:
-        value = int(os.getenv(name, str(default)))
-    except (TypeError, ValueError):
-        value = default
-    return max(minimum, min(maximum, value))
-
-
-def int_set(name):
-    values = set()
-    for part in os.getenv(name, "").split(","):
-        part = part.strip()
-        if not part:
-            continue
-        try:
-            values.add(int(part))
-        except ValueError:
-            continue
-    return frozenset(values)
-
-
 @dataclass(frozen=True)
 class Settings:
     telegram_bot_token: str
@@ -40,65 +19,25 @@ class Settings:
     publish_channel_id: int
     openai_api_key: str
     openai_model: str
-    check_interval_minutes: int
-    min_importance_to_send: int
-    database_path: str
-    health_port: int
-    moderation_interval_seconds: int
     telegram_api_id: int
     telegram_api_hash: str
     telegram_session: str
-    max_article_chars: int
-    max_ai_candidates_per_cycle: int
+    check_interval_seconds: int
     max_completion_tokens: int
-    moderation_allowed_user_ids: frozenset[int]
-    history_retention_days: int
-    ai_max_retries: int
-    max_model_calls_per_day: int
-    max_published_news_per_day: int
+    database_path: str
 
 
 def get_settings():
-    # Keep the monitor genuinely near-real-time, but allow a small amount of
-    # configuration without letting an accidental Railway variable create a
-    # huge backlog.
-    check_interval = bounded_int("CHECK_INTERVAL_MINUTES", 1, 1, 2)
-    moderation_interval = bounded_int("MODERATION_INTERVAL_SECONDS", 45, 20, 60)
-
     return Settings(
         telegram_bot_token=required("TELEGRAM_BOT_TOKEN"),
         moderation_chat_id=int(required("MODERATION_CHAT_ID")),
         publish_channel_id=int(required("PUBLISH_CHANNEL_ID")),
         openai_api_key=required("OPENAI_API_KEY"),
         openai_model=os.getenv("OPENAI_MODEL", "gpt-5-mini").strip() or "gpt-5-mini",
-        check_interval_minutes=check_interval,
-        min_importance_to_send=bounded_int("MIN_IMPORTANCE_TO_SEND", 3, 1, 10),
-        database_path=os.getenv("DATABASE_PATH", "/app/data/news.db"),
-        health_port=int(os.getenv("HEALTH_PORT", "8080")),
-        moderation_interval_seconds=moderation_interval,
         telegram_api_id=int(required("TELEGRAM_API_ID")),
         telegram_api_hash=required("TELEGRAM_API_HASH"),
         telegram_session=required("TELEGRAM_SESSION"),
-        # A Telegram news post almost never needs 24,000 characters of source
-        # material. This is the main API-cost guard.
-        max_article_chars=bounded_int("MAX_ARTICLE_CHARS", 6000, 3000, 12000),
-        # Hard guard against a source backlog/restart spending the whole API
-        # balance in one polling cycle.
-        max_ai_candidates_per_cycle=bounded_int("MAX_AI_CANDIDATES_PER_CYCLE", 6, 4, 12),
-        # The editor must have enough output budget to preserve a complete
-        # multi-paragraph Telegram post. A low cap is a direct cause of
-        # unfinished sentences and missing paragraphs.
-        max_completion_tokens=bounded_int("MAX_COMPLETION_TOKENS", 1100, 400, 1600),
-        # Optional allow-list for moderation callbacks. When empty, the existing
-        # private-chat behavior is preserved; when configured, only these users
-        # can publish or reject.
-        moderation_allowed_user_ids=int_set("MODERATION_ALLOWED_USER_IDS"),
-        # Keep SQLite bounded on a long-running Railway deployment.
-        history_retention_days=bounded_int("HISTORY_RETENTION_DAYS", 30, 7, 180),
-        # Retries are only used for transient API failures.
-        ai_max_retries=bounded_int("AI_MAX_RETRIES", 0, 0, 0),
-        max_model_calls_per_day=bounded_int("MAX_MODEL_CALLS_PER_DAY", 100, 25, 500),
-        # This quota counts only news successfully published to the channel.
-        # Moderation/rejections do not consume it.
-        max_published_news_per_day=bounded_int("MAX_PUBLISHED_NEWS_PER_DAY", 25, 1, 100),
+        check_interval_seconds=max(10, int(os.getenv("CHECK_INTERVAL_SECONDS", "30"))),
+        max_completion_tokens=max(1000, int(os.getenv("MAX_COMPLETION_TOKENS", "8000"))),
+        database_path=os.getenv("DATABASE_PATH", "/app/data/news.db"),
     )
