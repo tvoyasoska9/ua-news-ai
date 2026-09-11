@@ -29,6 +29,17 @@ FACTUAL RULES:
 12. If the source is not Ukrainian, translate it into natural Ukrainian.
 13. Preserve useful quote formatting only when it contains a genuine quotation. Otherwise write normal blocks naturally.
 
+MANDATORY EDITORIAL REBUILD:
+- First extract the FACTS mentally. Then write the post from those facts, not by walking through the source sentence by sentence.
+- NEVER follow the source paragraph order mechanically.
+- Choose the strongest news angle yourself and build a new composition around it.
+- You may merge several source paragraphs into one, split one source paragraph into several, move secondary facts later, or omit genuine repetition.
+- The finished post must look like it was independently written by a news editor who only had access to the facts.
+- Synonym replacement is NOT rewriting.
+- Changing only a few words while preserving the source structure is a FAILURE.
+- Do not preserve the same sequence of paragraphs, the same sequence of sentences, or the same fact-by-fact progression when another logical composition is possible.
+- Before returning the answer, perform this final test: if a reader can place the source and result side by side and immediately recognize the same skeleton, rewrite the result from scratch.
+
 COMPOSITION:
 13. Return a concise factual headline.
 14. Remove redundant sentences instead of paraphrasing them again.
@@ -88,17 +99,41 @@ def _is_too_close_to_source(source, edited):
         return False
 
     ratio = SequenceMatcher(None, source, edited).ratio()
-    if len(source) >= 45 and len(edited) >= 45 and ratio >= 0.82:
+    if len(source) >= 45 and len(edited) >= 45 and ratio >= 0.72:
         return True
 
     src_words = re.findall(r"(?u)\b[\w’'-]+\b", source)
     out_words = re.findall(r"(?u)\b[\w’'-]+\b", edited)
-    if len(src_words) >= 7 and len(out_words) >= 7:
-        runs = {tuple(src_words[i:i+7]) for i in range(len(src_words)-6)}
-        if any(tuple(out_words[i:i+7]) in runs for i in range(len(out_words)-6)):
+    if len(src_words) >= 5 and len(out_words) >= 5:
+        runs = {tuple(src_words[i:i+5]) for i in range(len(src_words)-4)}
+        if any(tuple(out_words[i:i+5]) in runs for i in range(len(out_words)-4)):
             return True
 
     return False
+
+def _looks_like_source_skeleton(source_blocks, edited_blocks):
+    """Reject drafts that preserve the source block-by-block skeleton."""
+    if len(source_blocks) < 3 or len(edited_blocks) != len(source_blocks):
+        return False
+
+    def score(a, b):
+        aw = _word_set(a)
+        bw = _word_set(b)
+        if not aw or not bw:
+            return 0.0
+        return len(aw & bw) / max(1, min(len(aw), len(bw)))
+
+    best_indices = []
+    best_scores = []
+    for edited in edited_blocks:
+        scores = [score(source["text"], edited["text"]) for source in source_blocks]
+        best = max(range(len(scores)), key=scores.__getitem__)
+        best_indices.append(best)
+        best_scores.append(scores[best])
+
+    same_order = best_indices == list(range(len(source_blocks)))
+    strong_alignment = sum(s >= 0.48 for s in best_scores) >= max(2, len(source_blocks) - 1)
+    return same_order and strong_alignment
 
 def _strip_repeated_lead(title, text):
     text = str(text or "").strip()
@@ -168,9 +203,16 @@ class SimpleNewsEditor:
         ]}
 
         last_error = None
-        for _ in range(3):
+        for attempt in range(3):
             try:
-                data = await self._call(json.dumps(payload, ensure_ascii=False))
+                request_payload = dict(payload)
+                if attempt:
+                    request_payload["REWRITE_MODE"] = (
+                        "PREVIOUS VERSION WAS REJECTED FOR BEING TOO CLOSE TO THE SOURCE. "
+                        "START FROM FACTS AGAIN. CHANGE THE EDITORIAL COMPOSITION, PARAGRAPH ORDER "
+                        "AND FACT PROGRESSION. DO NOT DO A SYNONYM-BASED PARAPHRASE."
+                    )
+                data = await self._call(json.dumps(request_payload, ensure_ascii=False))
                 title = clean(data.get("title"))
                 if not title:
                     raise ValueError("AI returned no rewritten title")
@@ -199,6 +241,9 @@ class SimpleNewsEditor:
                     for edited in edited_blocks
                 ):
                     raise ValueError("AI copied source wording instead of rewriting it")
+
+                if _looks_like_source_skeleton(blocks, edited_blocks):
+                    raise ValueError("AI preserved the source paragraph skeleton instead of editorially rebuilding the news")
 
                 edited_blocks = remove_repeated_headline(title, edited_blocks)
                 text = render_blocks(edited_blocks)
