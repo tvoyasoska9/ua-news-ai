@@ -1,4 +1,6 @@
+import json
 import logging
+import subprocess
 from datetime import datetime
 from html import escape
 from pathlib import Path
@@ -70,6 +72,61 @@ class ModerationBot:
         return [(p, k) for p, k in zip(raw.media_paths or [], raw.media_types or [])
                 if p and Path(p).exists() and k in {"photo", "video"}]
 
+    def _video_kwargs(self, path):
+        """Read the real display geometry from the original file.
+
+        Width/height are passed explicitly to Telegram so vertical and rotated
+        source videos are not guessed as square or displayed with a wrong aspect
+        ratio. If ffprobe is unavailable, Telegram's normal detection remains
+        the fallback.
+        """
+        try:
+            probe = subprocess.run(
+                [
+                    "ffprobe", "-v", "error",
+                    "-select_streams", "v:0",
+                    "-show_entries", "stream=width,height,duration:stream_tags=rotate:stream_side_data=rotation",
+                    "-of", "json", str(path),
+                ],
+                capture_output=True, text=True, timeout=8, check=False,
+            )
+            if probe.returncode != 0:
+                return {"supports_streaming": True, "filename": Path(path).name}
+            data = json.loads(probe.stdout or "{}")
+            streams = data.get("streams") or []
+            if not streams:
+                return {"supports_streaming": True, "filename": Path(path).name}
+            stream = streams[0]
+            width = int(stream.get("width") or 0)
+            height = int(stream.get("height") or 0)
+            rotation = 0
+            tags = stream.get("tags") or {}
+            try:
+                rotation = int(tags.get("rotate") or 0)
+            except (TypeError, ValueError):
+                rotation = 0
+            for side in stream.get("side_data_list") or []:
+                if "rotation" in side:
+                    try:
+                        rotation = int(side["rotation"])
+                    except (TypeError, ValueError):
+                        pass
+            if abs(rotation) % 180 == 90 and width and height:
+                width, height = height, width
+
+            result = {"supports_streaming": True, "filename": Path(path).name}
+            if width > 0 and height > 0:
+                result.update({"width": width, "height": height})
+            try:
+                duration = int(float(stream.get("duration") or 0))
+                if duration > 0:
+                    result["duration"] = duration
+            except (TypeError, ValueError):
+                pass
+            return result
+        except Exception:
+            return {"supports_streaming": True, "filename": Path(path).name}
+
     def _cached_from_messages(self, messages, media):
         cached = []
         for message, (_, kind) in zip(messages, media):
@@ -98,7 +155,7 @@ class ModerationBot:
                 else:
                     message = await self.app.bot.send_video(
                         chat_id, handle, caption=caption, parse_mode="HTML",
-                        reply_markup=reply_markup
+                        reply_markup=reply_markup, **self._video_kwargs(path)
                     )
             return self._cached_from_messages([message], media), message
 
@@ -109,7 +166,10 @@ class ModerationBot:
                 handle = open(path, "rb")
                 handles.append(handle)
                 kwargs = {"caption": caption, "parse_mode": "HTML"} if index == 0 and len(caption) <= CAPTION_LIMIT else {}
-                payload.append(InputMediaVideo(handle, **kwargs) if kind == "video" else InputMediaPhoto(handle, **kwargs))
+                if kind == "video":
+                    payload.append(InputMediaVideo(handle, **self._video_kwargs(path), **kwargs))
+                else:
+                    payload.append(InputMediaPhoto(handle, **kwargs))
             messages = await self.app.bot.send_media_group(chat_id, payload)
             cached = self._cached_from_messages(messages, media)
         finally:
