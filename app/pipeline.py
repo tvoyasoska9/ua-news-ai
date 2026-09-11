@@ -256,6 +256,13 @@ class NewsPipeline:
             self._resort_and_trim_queue()
 
         log.info("Moderation queue size: %s", len(self.queue))
+        log.info(
+            "Daily usage | prepared_news: %s/%s | model_calls: %s/%s",
+            self.db.daily_count("prepared_news"),
+            self.settings.max_prepared_news_per_day,
+            self.db.daily_count("model_calls"),
+            self.settings.max_model_calls_per_day,
+        )
 
     async def moderation_worker(self):
         while True:
