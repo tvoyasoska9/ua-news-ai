@@ -124,8 +124,16 @@ class NewsBot:
         return None
 
     def _public_body(self, item, source=""):
-        title = escape(strip_source_mentions(item.title, source))
-        body = sanitize_news_html(item.text, source).strip()
+        # Final rendering is a second, independent firewall. A bad draft must
+        # never be able to leak an outlet attribution into either moderation or
+        # public publication.
+        raw_title = strip_source_mentions(item.title, source)
+        raw_title = strip_source_mentions(raw_title, source)
+        raw_title = re.sub(r"\\s+([,.;:!?])", r"\\1", raw_title).strip(" \\n—–-,:;")
+        title = escape(raw_title)
+
+        body = sanitize_news_html(item.text, source)
+        body = sanitize_news_html(body, source).strip()
         return title, body
 
     def moderation_text(self, item, published_at=None, source=None, original_url=None):
