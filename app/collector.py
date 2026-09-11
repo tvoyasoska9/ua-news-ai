@@ -18,7 +18,6 @@ PROMO_RE = re.compile(
     r"(?iu)^(?:.*(?:підписатись|підписатися|подписаться|subscribe|надіслати новину|прислать новость|send news).*)$"
 )
 
-
 async def get_telegram_client(settings):
     global _telegram_client
     if _telegram_client and _telegram_client.is_connected():
@@ -42,29 +41,34 @@ async def get_telegram_client(settings):
         log.info("Telegram monitor connected")
         return _telegram_client
 
-
 def clean_source_text(value, username=""):
+    # Keep the news body and its paragraph structure. Remove only obvious
+    # channel/service noise; do not delete factual lines because they are short.
     lines = []
     for raw in str(value or "").splitlines():
         line = raw.strip()
         if not line:
+            lines.append("")
             continue
         if PROMO_RE.match(line):
             continue
         if username and line.lower() in {username.lower(), "@" + username.lower()}:
             continue
-        if re.fullmatch(r"@?[A-Za-z0-9_]{3,}", line):
-            continue
-        if "t.me/" in line.lower() and len(line) < 180:
-            continue
         lines.append(line)
-    return "\n".join(lines).strip()
 
+    text = "\n".join(lines)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+def _plain_message_text(message):
+    raw = (message.message or "").strip()
+    if not raw:
+        return ""
+    return BeautifulSoup(raw, "html.parser").get_text("\n")
 
 def _title(text):
     first = next((x.strip() for x in text.splitlines() if x.strip()), "")
     return re.sub(r"\s+", " ", first)[:300].strip()
-
 
 async def fetch_telegram_source(client, source):
     username = source["username"]
@@ -87,16 +91,15 @@ async def fetch_telegram_source(client, source):
     items = []
     for group in groups:
         group.sort(key=lambda m: m.id)
-        text = ""
+
+        # Keep every caption/text fragment from the original post/album.
+        fragments = []
         for message in group:
-            raw = (message.message or "").strip()
-            if raw:
-                text = clean_source_text(
-                    BeautifulSoup(raw, "html.parser").get_text("\n", strip=True),
-                    username,
-                )
-                if text:
-                    break
+            cleaned = clean_source_text(_plain_message_text(message), username)
+            if cleaned and cleaned not in fragments:
+                fragments.append(cleaned)
+
+        text = "\n\n".join(fragments).strip()
         if not text:
             continue
 
@@ -124,7 +127,6 @@ async def fetch_telegram_source(client, source):
 
     return items
 
-
 async def collect_news(settings):
     client = await get_telegram_client(settings)
     groups = await asyncio.gather(
@@ -142,7 +144,6 @@ async def collect_news(settings):
     items.sort(key=lambda x: x.published_at or "", reverse=True)
     log.info("Collected %s source posts", len(items))
     return items
-
 
 async def materialize_news(news):
     if not news.media_messages:
@@ -174,7 +175,6 @@ async def materialize_news(news):
     news.media_path = paths[0] if paths else None
     news.media_type = types[0] if len(types) == 1 else ("album" if types else None)
     return news
-
 
 async def close_telegram_client():
     global _telegram_client
