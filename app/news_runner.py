@@ -21,27 +21,26 @@ class NewsRunner:
         self.last_activity = time.monotonic()
 
     async def _process_one(self, raw, recent):
-        if self.db.seen(raw.url):
-            return
-
-        if is_duplicate_text(raw.summary, recent):
-            self.db.mark(raw.url, raw.summary, "duplicate")
+        # Reserve the exact Telegram source post before any asynchronous work.
+        if not self.db.claim(raw.url, raw.summary):
             return
 
         try:
+            if is_duplicate_text(raw.summary, recent):
+                self.db.mark(raw.url, raw.summary, "duplicate")
+                return
+
             edited = await self.editor.edit(raw)
             await materialize_news(raw)
             await self.bot.send_for_moderation(edited, raw)
             self.db.mark(raw.url, raw.summary, "proposed")
             recent.append(raw.summary)
         except Exception:
-            # One malformed AI response must NEVER stop the whole news stream.
-            # Leave the item unmarked so it can be retried on the next cycle.
+            self.db.release(raw.url)
             log.exception("candidate failed: %s", raw.url)
 
     async def once(self):
         recent = self.db.recent_texts()
-
         for raw in await collect_news(self.settings):
             await self._process_one(raw, recent)
 
@@ -51,6 +50,5 @@ class NewsRunner:
                 await self.once()
             except Exception:
                 log.exception("news collection cycle error")
-
             self.last_activity = time.monotonic()
             await asyncio.sleep(self.settings.check_interval_seconds)
