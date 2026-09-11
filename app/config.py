@@ -81,10 +81,10 @@ def get_settings():
         telegram_session=required("TELEGRAM_SESSION"),
         # A Telegram news post almost never needs 24,000 characters of source
         # material. This is the main API-cost guard.
-        max_article_chars=bounded_int("MAX_ARTICLE_CHARS", 1800, 1200, 3000),
+        max_article_chars=bounded_int("MAX_ARTICLE_CHARS", 6000, 3000, 12000),
         # Hard guard against a source backlog/restart spending the whole API
         # balance in one polling cycle.
-        max_ai_candidates_per_cycle=bounded_int("MAX_AI_CANDIDATES_PER_CYCLE", 4, 4, 6),
+        max_ai_candidates_per_cycle=bounded_int("MAX_AI_CANDIDATES_PER_CYCLE", 6, 4, 12),
         # The editor must have enough output budget to preserve a complete
         # multi-paragraph Telegram post. A low cap is a direct cause of
         # unfinished sentences and missing paragraphs.
