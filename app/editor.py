@@ -144,6 +144,36 @@ def _contains_russian_text(value):
     return bool(tokens & RUSSIAN_MARKERS)
 
 
+# Known editorial/source attribution names must never leak into the rewritten news.
+# This removes only explicit attribution patterns, not factual names inside a sentence.
+_ATTRIBUTION_NAME_RE = re.compile(
+    r"(?iu)\\s*(?:,|—|–|-)\\s*(?:hromadske|ukrinform|уніан|уніан|interfax|reuters|ap|associated press|bbc|суспільне|радіо свобода)\\.?\\s*$"
+)
+_ATTRIBUTION_PHRASE_RE = re.compile(
+    r"(?iu)\\b(?:за даними|повідомляє|повідомив|зазначає)\\s+(?:hromadske|ukrinform|уніан|interfax|reuters|ap|bbc|суспільне|радіо свобода)\\b"
+)
+
+
+def _strip_explicit_attribution(value):
+    text = str(value or "").strip()
+    text = _ATTRIBUTION_PHRASE_RE.sub("", text)
+    text = _ATTRIBUTION_NAME_RE.sub("", text)
+    text = re.sub(r"\\s+([,.;:!?])", r"\\1", text)
+    return text.strip(" \\n—–-,:;")
+
+
+def _title_is_effectively_copied(title, source_title):
+    a = re.sub(r"[^\\wіїєґ'’-]+", " ", _plain(title).lower()).strip()
+    b = re.sub(r"[^\\wіїєґ'’-]+", " ", _plain(source_title).lower()).strip()
+    a = re.sub(r"\\s+", " ", a)
+    b = re.sub(r"\\s+", " ", b)
+    if not a or not b or min(len(a), len(b)) < 18:
+        return False
+    # Exact copy is always forbidden. Very high similarity on a sufficiently
+    # long headline is also treated as a copied formulation.
+    return a == b or (len(a) >= 35 and fuzz.ratio(a, b) >= 97)
+
+
 def _source_aliases(source):
     aliases = set()
     source = (source or "").strip()
@@ -195,6 +225,7 @@ def strip_source_mentions(value, source=""):
     if not text:
         return ""
 
+    text = _strip_explicit_attribution(text)
     text = TELEGRAM_URL_RE.sub(" ", text)
     text = SOURCE_LABEL_RE.sub(" ", text)
     text = TELEGRAM_SOURCE_RE.sub(" ", text)
@@ -525,9 +556,9 @@ class NewsEditor:
         return material, len(original_plain), completion_budget
 
     def _build_result(self, data, news, material, original_len):
-        title = strip_source_mentions(data.get("title") or "", news.source)
+        title = _strip_explicit_attribution(strip_source_mentions(data.get("title") or "", news.source))
 
-        text = sanitize_news_html(data.get("text") or "", news.source)
+        text = _strip_explicit_attribution(sanitize_news_html(data.get("text") or "", news.source))
 
         # Some Telegram posts expose only an emoji as their transport title
         # (for example "❗️"). The AI may then return an equally useless title
@@ -562,6 +593,11 @@ class NewsEditor:
                         raise QualityError("no usable Ukrainian factual title")
 
         text = sanitize_news_html(_finish_at_sentence_boundary(text), news.source)
+        title = _strip_explicit_attribution(title)
+        text = _strip_explicit_attribution(text)
+        if not _is_usable_title(title):
+            raise QualityError("title became unusable after source attribution cleanup")
+
         event_key = strip_source_mentions(data.get("event_key") or title or news.title, news.source)
 
         # Translation is mandatory for every moderation draft.  A Russian
@@ -576,10 +612,16 @@ class NewsEditor:
                 paragraphs = paragraphs[1:]
             text = "\n\n".join(paragraphs).strip()
 
-        # Coverage and similarity are guidance checks, not publication blockers.
-        # The previous hard gates rejected nearly every short Telegram item and
-        # starved the moderation queue. The prompt still requires Ukrainian
-        # rewriting; only an almost byte-for-byte copy remains a hard failure.
+        # A moderation card must contain an actual rewritten news item, not just
+        # a copied headline. These thresholds are deliberately calibrated so a
+        # genuinely short source can remain short while multi-paragraph factual
+        # posts cannot collapse into one line.
+        if _coverage_too_low(title, text, material):
+            raise QualityError("draft lost too much factual coverage")
+
+        if _title_is_effectively_copied(title, news.title):
+            raise QualityError("headline wording is effectively copied from the original")
+
         if _is_near_verbatim_copy(title, text, material):
             raise QualityError("wording is too close to the original")
 
