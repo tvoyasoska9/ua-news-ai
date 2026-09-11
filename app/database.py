@@ -1,4 +1,5 @@
 import json
+import hashlib
 import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
@@ -136,6 +137,22 @@ class Database:
 
     def add(self, url, fingerprint, title, source, status):
         now = datetime.now(timezone.utc).isoformat()
+
+        # The production database has a legacy UNIQUE index on fingerprint.
+        # Fingerprints are similarity hints, not primary identities: distinct
+        # Telegram posts can legitimately collide. Preserve URL as the identity
+        # and make only the stored fingerprint unique when such a collision
+        # exists, instead of crashing the entire pipeline.
+        stored_fingerprint = fingerprint or ""
+        if stored_fingerprint:
+            row = self.conn.execute(
+                "SELECT url FROM news WHERE fingerprint=? LIMIT 1",
+                (stored_fingerprint,),
+            ).fetchone()
+            if row and row[0] != url:
+                suffix = hashlib.sha256(url.encode("utf-8")).hexdigest()[:12]
+                stored_fingerprint = f"{stored_fingerprint}:{suffix}"
+
         self.conn.execute(
             "INSERT INTO news (url,fingerprint,title,source,status,created_at) "
             "VALUES (?,?,?,?,?,?) "
@@ -144,7 +161,7 @@ class Database:
             "title=excluded.title, "
             "source=excluded.source, "
             "status=excluded.status",
-            (url, fingerprint, title, source, status, now),
+            (url, stored_fingerprint, title, source, status, now),
         )
         self.conn.commit()
 
