@@ -505,9 +505,22 @@ class NewsBot:
         media_paths = payload["media_paths"]
         media_types = payload["media_types"]
         cached_media = payload.get("cached_media", [])
+        published_quota_reserved = False
 
         try:
             if action == "publish":
+                # The daily limit is for ACTUALLY PUBLISHED news only.
+                # Reserve a slot immediately before publication and release it
+                # if publication fails, so moderation cards and rejections never
+                # consume the user's daily quota.
+                if not self.db.try_consume_daily(
+                    "published_news", self.settings.max_published_news_per_day
+                ):
+                    await query.message.reply_text(
+                        f"⚠️ Денний ліміт опублікованих новин ({self.settings.max_published_news_per_day}) вже досягнуто."
+                    )
+                    return
+                published_quota_reserved = True
                 post_text = self.publish_text(item)
                 local_media = self._media_lists(media_type, media_path, media_paths, media_types)
                 published_with_media = await self._publish_media(
@@ -548,7 +561,10 @@ class NewsBot:
 
                 self.db.set_status(url, "published")
                 self.db.record_metric(url, source, "published")
-                await query.message.reply_text("✅ Опубліковано.")
+                published_quota_reserved = False
+                await query.message.reply_text(
+                    f"✅ Опубліковано. Сьогодні: {self.db.daily_count('published_news')}/{self.settings.max_published_news_per_day}"
+                )
             else:
                 self.db.set_status(url, "rejected")
                 await query.message.reply_text("❌ Відхилено.")
@@ -565,5 +581,7 @@ class NewsBot:
             await query.edit_message_reply_markup(reply_markup=None)
 
         except Exception:
+            if published_quota_reserved:
+                self.db.release_daily("published_news")
             log.exception("Failed to process moderation action: %s", action)
             await query.answer("Помилка публікації. Спробуйте ще раз.", show_alert=True)
