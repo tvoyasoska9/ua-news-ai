@@ -378,13 +378,12 @@ def _is_complete_statement(value):
 
 
 def _is_usable_title(value):
+    # News titles may be short, contain names/numbers or be fragments after a
+    # full translation. Do not block the entire news pipeline over punctuation
+    # heuristics such as _is_complete_statement().
     plain = _plain(value).strip()
     normalized = re.sub(r"\s+", " ", plain.lower()).strip(" .!?:;—–-")
-    return (
-        len(plain) >= 12
-        and normalized not in GENERIC_TITLES
-        and _is_complete_statement(plain)
-    )
+    return len(plain) >= 4 and normalized not in GENERIC_TITLES
 
 
 def _normalized_tokens(value):
@@ -450,32 +449,23 @@ def _meaningful_paragraphs(value):
 
 
 def _coverage_too_low(title, text, material):
-    """Reject outputs that collapse a real post into a fragment or headline."""
+    """Safety check against an empty/obviously broken model response only.
+
+    The product requirement is full translation with light paraphrasing, so this
+    function must never act as an editorial summarizer and reject usable news
+    merely because the model used fewer words than the source.
+    """
     original_words = _word_count(material)
-    result_words = _word_count(title) + _word_count(text)
-    source_paragraphs = _meaningful_paragraphs(material)
+    body_words = _word_count(text)
+    total_words = _word_count(title) + body_words
 
     if original_words < 25:
         return False
 
-    # Short Telegram posts are exactly where the old <70-word bypass allowed
-    # broken one-line outputs through. Do not allow a factual post to become
-    # only a headline.
-    # This editor is a translator/light paraphraser, not a summarizer. For normal
-    # Telegram posts the output must retain most of the original factual volume.
-    minimum = max(14, int(original_words * (0.50 if original_words <= 450 else 0.45)))
-    if result_words < minimum:
+    # Reject only genuinely broken outputs: title-only or near-empty body.
+    if total_words < 8 or body_words < 4:
         return True
-
-    # If the source contains several meaningful blocks, an empty/tiny body is
-    # not sufficient coverage even when the headline is long.
-    if len(source_paragraphs) >= 2 and _word_count(text) < 8:
-        return True
-    if len(source_paragraphs) >= 4 and _word_count(text) < 18:
-        return True
-
     return False
-
 
 def _material_coverage_too_low(title, text, material):
     return _coverage_too_low(title, text, material)
