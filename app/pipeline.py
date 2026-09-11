@@ -185,14 +185,24 @@ class NewsPipeline:
 
             if self.db.exists(raw.url):
                 status = self.db.get_status(raw.url) or "unknown"
+                # Transient/model-side quality failures must remain retryable.
+                # Do not silently turn a temporary bad generation into a
+                # permanently lost news item.
+                if status not in {"error_retry", "quality_rejected_final"}:
+                    log.info(
+                        "Candidate skipped | reason=already_handled | status=%s | source=%s | title=%s",
+                        status,
+                        raw.source,
+                        raw.title[:120],
+                    )
+                    _cleanup_media(raw.media_path, raw.media_paths)
+                    continue
                 log.info(
-                    "Candidate skipped | reason=already_handled | status=%s | source=%s | title=%s",
+                    "Retrying previously failed candidate | status=%s | source=%s | title=%s",
                     status,
                     raw.source,
                     raw.title[:120],
                 )
-                _cleanup_media(raw.media_path, raw.media_paths)
-                continue
 
             # Do not spend AI calls on historical backlog.
             if _is_too_old(raw.published_at):
@@ -275,9 +285,9 @@ class NewsPipeline:
                         edited = await self.editor.repair(raw, reason)
                         self.db.record_metric(raw.url, raw.source, "model_completed")
                     except QualityError as repair_error:
-                        self.db.set_status(raw.url, "quality_rejected_final")
+                        self.db.set_status(raw.url, "error_retry")
                         log.warning(
-                            "Draft rejected after one repair | source=%s | title=%s | reason=%s",
+                            "Draft still failed quality check; keeping candidate retryable | source=%s | title=%s | reason=%s",
                             raw.source,
                             raw.title[:100],
                             str(repair_error),
