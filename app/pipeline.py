@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 from app.collector import collect_news, fingerprint, materialize_news
 from app.dedup import is_similar_title, is_duplicate_event
-from app.editor import NewsEditor
+from app.editor import NewsEditor, QualityError
 
 log = logging.getLogger(__name__)
 
@@ -215,12 +215,44 @@ class NewsPipeline:
                     self.db.set_status(raw.url, "daily_model_limit")
                     log.warning("Daily model-call limit reached (%s)", self.settings.max_model_calls_per_day)
                     break
+
                 self.db.record_metric(raw.url, raw.source, "model_started")
-                edited = await self.editor.edit(raw)
-                self.db.record_metric(raw.url, raw.source, "model_completed")
+                try:
+                    edited = await self.editor.edit(raw)
+                    self.db.record_metric(raw.url, raw.source, "model_completed")
+                except QualityError as first_quality_error:
+                    # A deterministic quality gate rejected the draft. This is
+                    # not a reason to permanently lose the news item: spend at
+                    # most one additional quota slot on a fresh rewrite with the
+                    # exact failure reason.
+                    reason = str(first_quality_error)
+                    self.db.record_metric(raw.url, raw.source, "ai_quality_failed")
+                    log.warning("Draft failed quality gate; attempting one repair | %s | %s", raw.title[:100], reason)
+
+                    if not self._consume_model_slot():
+                        self.db.set_status(raw.url, "quality_retry_pending")
+                        self.db.record_metric(raw.url, raw.source, "ai_repair_deferred")
+                        log.warning("No model slot available for quality repair; candidate will remain retryable")
+                        _cleanup_media(raw.media_path, raw.media_paths)
+                        continue
+
+                    self.db.record_metric(raw.url, raw.source, "ai_repair")
+                    try:
+                        edited = await self.editor.repair(raw, reason)
+                        self.db.record_metric(raw.url, raw.source, "model_completed")
+                        log.info("Quality repair succeeded: %s", raw.title[:100])
+                    except QualityError as repair_error:
+                        self.db.set_status(raw.url, "quality_failed_retry")
+                        self.db.record_metric(raw.url, raw.source, "ai_error")
+                        log.warning("Quality repair also failed; candidate remains retryable | %s | %s", raw.title[:100], repair_error)
+                        _cleanup_media(raw.media_path, raw.media_paths)
+                        continue
             except Exception:
                 log.exception("AI editing failed")
-                self.db.set_status(raw.url, "error")
+                # Runtime/API failures must not poison the URL forever. The
+                # database treats this status as retryable on a later cycle.
+                self.db.set_status(raw.url, "error_retry")
+                self.db.record_metric(raw.url, raw.source, "ai_error")
                 _cleanup_media(raw.media_path, raw.media_paths)
                 continue
 
